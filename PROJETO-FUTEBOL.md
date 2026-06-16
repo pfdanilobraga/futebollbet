@@ -1,7 +1,7 @@
 # ⚽ Projeto Futebol — Banco de dados e probabilidades de vitória
 
 > Documento de apresentação do projeto. Autossuficiente: tudo que foi feito, como funciona,
-> o que já existe e para onde vamos. Atualizado em **10/06/2026**.
+> o que já existe e para onde vamos. Atualizado em **16/06/2026**.
 
 ---
 
@@ -109,10 +109,13 @@ Pasta: raiz do projeto (`./`)
 | `transporte.py` | Camada de rede: tenta curl-cffi e cai p/ **Chrome real (Playwright)** no 403 de fingerprint |
 | `raspador.py` | **Raspador definitivo** — navega na partida, clica nas abas e intercepta as respostas que a própria página carrega (contorna o Cloudflare). Pega tudo. |
 | `gravar.py` | Funções de gravação JSON→banco, compartilhadas por coletor e raspador |
-| `probabilidades.py` | Cálculo de probabilidades (3 modelos) |
-| `features.py` | Engenharia de features p/ ML — leakage-safe, 20 features |
+| `probabilidades.py` | Cálculo de probabilidades 1X2 (3 modelos) |
+| `features.py` | Engenharia de features 1X2 p/ ML — leakage-safe, 20 features |
 | `treino.py` | Treina logística + XGBoost, valida (Brier/log-loss), salva `modelo.joblib` |
 | `prever.py` | Previsão 1X2 com o modelo de ML treinado |
+| `mercados.py` | **Mercados de contagem Over/Under** (escanteios, chutes, chutes-gol, cartões): Poisson na soma + odds implícitas + combinado, total e por time |
+| `features_mercado.py` `treino_mercado.py` | ML de contagem: features leakage-safe + regressão do total → P(Over/Under) |
+| `validar_mercado.py` | Backtest dos mercados de contagem (Brier/log-loss/ROI) |
 | `amostras/` | 16 payloads JSON reais da API (referência de estrutura) |
 | `futebol.db` | O banco de dados |
 
@@ -255,6 +258,69 @@ A tabela `probabilidade` guarda cada previsão; a view `v_resultados` tem os res
 Backtesting por **Brier score / log-loss**, sempre comparando contra o baseline das odds.
 Meta realista: **agregar informação às odds**, não "vencer o mercado" — vencer bookmaker
 de forma consistente é raríssimo; o valor está em detectar divergências pontuais.
+
+---
+
+## 7. Mercados de contagem — escanteios, chutes, chutes ao gol, cartões
+
+Extensão do projeto além do 1X2 (gols). **Insight central:** o modelo de gols é um
+caso particular de um **modelo de contagem**. Escanteios/chutes/cartões são processos
+de contagem → mercados **Over/Under** (total da partida e total por time), não 1X2.
+Matematicamente é *mais simples* que o 1X2: uma única Poisson na SOMA (`λ_casa+λ_fora`)
+e `P(N > linha)` — sem ordenação de dois Poisson.
+
+Os dados **já existiam no banco**: `evento_estatistica` guarda escanteios/chutes por
+jogo, e `odd` guarda os mercados de escanteios/cartões. Faltava o motor de mercado.
+
+### Esquema
+Nova tabela **`probabilidade_mercado`** (`evento_id, mercado, linha, modelo, p_over,
+p_under, …`) — genérica para qualquer mercado de contagem. O 1X2 continua em
+`probabilidade`.
+
+### Pré-jogo (`mercados.py`)
+Engine parametrizado pela config `MERCADOS` (nomes de estatística + de odds + linhas
+por mercado, com sinônimos por idioma). Para cada mercado:
+1. **`odds_implicitas`** — Over/Under do mercado, sem margem.
+2. **`poisson`** — força para/contra por mando (de `evento_estatistica`), `λ_total` →
+   `P(Over/Under)` por linha; **meia-linha** sem push, **linha inteira** remove o push.
+3. **`combinado`** — 70% odds + 30% Poisson.
+
+Também emite **totais por time** (mandante/visitante) usando os `λ` separados.
+Descoberta dos nomes reais do banco: `py mercados.py stats` / `odds`.
+
+### Ao vivo (`bet365/calibrar_mercado.py` + `prob_aovivo_mercado.py`)
+Análogo do modelo de gols. **Lacuna conhecida:** o `incidente` guarda minuto de gols
+e cartões, mas **não de escanteios/chutes** — sem timing por minuto. Solução:
+- **Nível** (média total + share da casa) calibrado dos dados reais — confiável.
+- **Forma** da curva por minuto = *prior* (default `subida` p/ escanteios/cartões).
+- **Blend de ritmo**: escala `Λ` pelo ritmo OBSERVADO no jogo (contagem atual ÷
+  esperado-até-agora), com shrinkage `w=min(0,85; m/(m+25))`. É o que torna o modelo
+  responsivo — escanteios/chutes acumulam rápido. Mais multiplicadores de placar
+  (time perdendo cria mais escanteios) e vermelho. Saída: `P(Over/Under)` total e por
+  time + banda de confiança.
+
+### Alertador no navegador (`bet365/alertador_escanteios.js`)
+Somente leitura. O overview do bet365 só mostra placar de gols, então o alertador
+opera no **jogo aberto** (lê a contagem de escanteios das rodas do painel + odds da
+aba de escanteios). O modelo é um **port fiel** do `prob_aovivo_mercado.py`
+(**paridade JS×Python testada, idêntica até 0,1%**). Os seletores de DOM são
+best-effort (ajustáveis); `escDebug()` mostra o que foi lido.
+
+### ML (`features_mercado.py` + `treino_mercado.py` + `validar_mercado.py`)
+Mesmo princípio leakage-safe do `features.py`: o alvo é o **total** da estatística e
+todas as features (médias para/contra por mando, prior Poisson, ritmo, descanso, H2H)
+usam só jogos anteriores ao apito — inclusive o prior Poisson, computado do histórico
+incremental (não do banco inteiro). `treino_mercado.py` ajusta um `PoissonRegressor`
+no total e converte em `P(Over/Under)` por linha; valida MAE + Brier/log-loss contra a
+média e contra o Poisson ataque/defesa. `validar_mercado.py` faz o backtest das
+probabilidades gravadas vs. totais reais (Brier/log-loss/ROI + confiabilidade).
+
+### Pendências de dados (mesma natureza do 1X2)
+1. Backfill `coletor.py pendentes` → popular `evento_estatistica` em massa.
+2. Confirmar nomes reais (`mercados.py stats`/`odds`) e ajustar os sinônimos.
+3. Confirmar os seletores de DOM de escanteios na página viva (`escDebug()`).
+4. (Opcional, p/ precisão no fim de jogo ao vivo) coletar o **minuto do escanteio** →
+   recalibra a FORMA da curva, hoje um prior.
 
 ---
 

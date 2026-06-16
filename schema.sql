@@ -205,6 +205,22 @@ CREATE TABLE IF NOT EXISTS probabilidade (
     PRIMARY KEY (evento_id, modelo)
 );
 
+-- Saída de modelos de mercados de CONTAGEM (Over/Under): escanteios, chutes,
+-- chutes ao gol, cartões. Genérica — 1 linha por (evento, mercado, linha, modelo).
+-- O 1X2 continua na tabela `probabilidade`; aqui ficam os totais Over/Under.
+CREATE TABLE IF NOT EXISTS probabilidade_mercado (
+    evento_id     INTEGER NOT NULL REFERENCES evento(id),
+    mercado       TEXT NOT NULL,              -- 'escanteios' | 'chutes' | 'chutes_gol' | 'cartoes'
+    linha         REAL NOT NULL,              -- linha do over/under (ex.: 9.5)
+    modelo        TEXT NOT NULL,              -- 'odds_implicitas' | 'poisson' | 'combinado'
+    p_over        REAL NOT NULL,
+    p_under       REAL NOT NULL,
+    detalhes_json TEXT,                       -- lambdas, médias, odds usadas etc.
+    calculado_em  TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (evento_id, mercado, linha, modelo)
+);
+CREATE INDEX IF NOT EXISTS ix_prob_mercado ON probabilidade_mercado(evento_id, mercado);
+
 -- Log de sinais do alertador ao vivo (bet365) — pra validar P&L/calibracao
 CREATE TABLE IF NOT EXISTS sinal_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
