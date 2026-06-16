@@ -128,11 +128,31 @@ jogo todo; cache 25s; só jogos ≥ gate (75'). Liga com `sofascore_live.py serv
 Teste: `py bet365/sofascore_live.py momento <event_id>`.
 
 ### Tiers (alertador_valor.js)
-`IDLE → WATCH(80') → ARM(88'+, valor✓, mercado aberto) → GREEN`. GREEN só com:
+`IDLE → WATCH(80') → VALOR(75'+) → ARM(88'+, valor✓, mercado aberto) → GREEN`. GREEN só com:
 minuto ≥ `90 + (acréscimo − buffer)` (ou 92' se desconhecido), `fr.strict`, mercado
-aberto, sem surto de gol, confirmado por 2 scans. Cor: cinza/âmbar/verde-pulsante.
-CASA=mandante (col.1), EMPATE=X, FORA=visitante (col.2). No ARM/GREEN, **acende a
-célula exata** (`.ovm-ParticipantOddsOnly[idx]`) do resultado dominante = onde clicar.
+aberto, sem surto de gol, confirmado por 2 scans. Precedência `GREEN>ARM>VALOR>WATCH`.
+Cor: cinza/roxo(VALOR)/âmbar/verde-pulsante. CASA=mandante (col.1), EMPATE=X, FORA=visitante
+(col.2). No VALOR/ARM/GREEN, **acende a célula exata** (`.ovm-ParticipantOddsOnly[idx]`) do
+resultado dominante = onde clicar.
+
+### v2.7 — precisão + sinal mais cedo (5 alavancas; teto honesto −EV permanece)
+- **Cartão vermelho (A):** `lerVermelhos(fx)` lê o marcador 🟥 do DOM (lado pela posição vertical
+  vs os 2 `TeamName`; 0/0 se não separar) → alimenta `redC/redF` no `probs()` (antes era fixo 0).
+  Fallback SofaScore `/event/{id}/incidents` (`vermelhos_confronto`). Badge mostra `🟥c-f`.
+- **Banda de confiança (B):** `bandaProbsIdx` (porta de `banda_confianca`) escala Λ por `exp(±σ)`;
+  `armOk` gateia no **limite inferior** `pLo` (não no ponto) quando `cfg.usarBanda`. Auto-exige
+  colchão maior quanto mais cedo (banda mais larga). σ = base 0.30 + sem_stats 0.10 + por_mult 0.15
+  (paridade Py↔JS verificada <1pp). Badge mostra `[lo–hi%]`. Toggle "banda" no painel.
+- **Tier VALOR (C):** roxo, de `valorMin`(75'); dispara com `pLo ≥ probMin+valorMargin` E
+  `oddTela/justo ≥ 1+valorEdge` E mercado aberto. **Não** é GREEN (mais variância), **sem** beep/log.
+  Input `🎯 +pp` no painel.
+- **Acréscimo real (D):** `lerAcrescimoPainel()` lê "90+N" do relógio do painel do jogo aberto
+  (só `tot≥90` + nome casado) → melhora `greenMin/greenCeil`.
+- **Loop de calibração (E):** `recalibrar_sinais.py` lê `sinal_log` liquidado e ajusta
+  P_raw→P_calib (n<40 identidade; 40–79 Platt; ≥80 isotônica-PAV), **capado a ±0.15** e só
+  deploya se melhora o Brier. Serve em `/correcao`; `aplicarCorrecao`(JS)/`aplicar_correcao`(Py)
+  aplicam (idênticos, parity verificada). `sinal_log.prob` logado é o **cru** (não recorrige).
+  `calibracao_correcao.json` no `.gitignore`.
 
 ### Travas de mercado (modelo só vale p/ 1X2 = "Resultado Final")
 1. **Aba:** lê `.ovm-ClassificationMarketSwitcherMenu_Item-active`; se não for

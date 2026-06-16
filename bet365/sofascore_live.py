@@ -250,6 +250,34 @@ def momentum_confronto(event_id, agora):
     return m
 
 
+CARD_TTL = 30           # cartoes mudam pouco -> cache curto (s)
+_cache_cards = {}       # event_id -> (redC, redF, ts)
+
+
+def vermelhos_confronto(event_id, agora):
+    """{redC, redF}: vermelhos (red + 2o amarelo) por lado, do SofaScore. None se sem dado.
+    Fallback do (A): so usado quando o DOM do bet365 nao trouxe o cartao."""
+    if not event_id:
+        return None
+    c = _cache_cards.get(event_id)
+    if c and agora - c[2] < CARD_TTL:
+        return {"redC": c[0], "redF": c[1]}
+    st, data = transporte.buscar(f"/event/{event_id}/incidents", ok_404=True)
+    if st != 200 or not data:
+        return None
+    rc = rf = 0
+    for it in data.get("incidents", []):
+        if it.get("incidentType") != "card":
+            continue
+        if (it.get("incidentClass") or "").lower() in ("red", "yellowred"):
+            if it.get("isHome"):
+                rc += 1
+            else:
+                rf += 1
+    _cache_cards[event_id] = (rc, rf, agora)
+    return {"redC": rc, "redF": rf}
+
+
 def casar(b365_home, b365_away, eventos):
     """Acha o evento SofaScore que corresponde ao confronto do bet365."""
     h, a = normalizar(b365_home), normalizar(b365_away)
@@ -295,6 +323,9 @@ def montar_cross(com_forca=False, com_momentum=False, gate_min=75):
                 m = momentum_confronto(ev.get("event_id"), agora)
                 if m:
                     entry["mom"] = {"casa": m["casa"], "fora": m["fora"]}
+                rv = vermelhos_confronto(ev.get("event_id"), agora)   # (A) fallback de cartao vermelho
+                if rv and (rv["redC"] or rv["redF"]):
+                    entry["redC"] = rv["redC"]; entry["redF"] = rv["redF"]
         cross[ev["casa_norm"] + "|" + ev["fora_norm"]] = entry
     return cross, status, len(eventos)
 
@@ -367,6 +398,13 @@ def servir(porta=8765, intervalo=12, com_forca=False, com_momentum=False, gate_m
                 q = parse_qs(u.query)
                 casa = (q.get("casa", [""])[0]); fora = (q.get("fora", [""])[0])
                 return self._json(fbref_forca.forca_times(casa, fora) or {})
+            if u.path.startswith("/correcao"):     # /correcao -> mapa de calibracao (loop E)
+                p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibracao_correcao.json")
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        return self._json(json.load(f))
+                except (OSError, ValueError):
+                    return self._json({"metodo": "identidade"})
             atualizar()                            # senao: cross do SofaScore (momentum/min/status)
             self._json(cache["cross"])
 

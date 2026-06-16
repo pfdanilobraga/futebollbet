@@ -5,6 +5,7 @@ futebol.db-shm
 amostras/
 bet365/fbref_cache.json
 bet365/fbref_dados.txt
+bet365/calibracao_correcao.json
 logs/
 *.log
 logsbackfill-incidentes.log

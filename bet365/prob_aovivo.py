@@ -194,16 +194,66 @@ def mantem(gc, gf, p_casa, p_emp, p_fora):
     return p_emp, "EMPATE"
 
 
-def banda_confianca(m, gc, gf, cal, **kw):
-    """Intervalo em P(resultado atual) propagando incerteza no Lambda."""
+def banda_confianca(m, gc, gf, cal, idx=None, **kw):
+    """Intervalo em P propagando incerteza no Lambda.
+    idx=None -> banda do RESULTADO ATUAL (mantem). idx em {0,1,2} -> banda desse
+    resultado (1/X/2) — usado p/ casar com o alertador, que gateia no DOMINANTE."""
     sl = cal.get("sigma_log", CAL_DEFAULT["sigma_log"])
     sigma_log = sl["base"]
     if kw.get("mom_casa", 1.0) == 1.0 and kw.get("mom_fora", 1.0) == 1.0:
         sigma_log += sl.get("sem_stats", 0.10)
-    # mais gols (exp(+s)) -> resultado mais facil de mudar -> p_mantem menor
+    # multiplicador forte -> mais incerteza (paridade com bandaSigmaLog do alertador_valor.js)
+    restante = max(0.0, 90.0 - m) + kw.get("acrescimo", 4.0)
+    M_c, M_f = multiplicadores(gc, gf, m, restante, cal, kw.get("mom_casa", 1.0),
+                               kw.get("mom_fora", 1.0), kw.get("red_casa", 0), kw.get("red_fora", 0))
+    if abs(math.log(M_c or 1.0)) > 0.2 or abs(math.log(M_f or 1.0)) > 0.2:
+        sigma_log += sl.get("por_mult", 0.15)
+    # mais gols (exp(+s)) -> resultado mais facil de mudar -> p menor
     p_hi = probabilidades(m, gc, gf, cal, escala_lam=math.exp(-sigma_log), **kw)
     p_lo = probabilidades(m, gc, gf, cal, escala_lam=math.exp(+sigma_log), **kw)
-    return mantem(gc, gf, *p_lo)[0], mantem(gc, gf, *p_hi)[0]
+    if idx is None:
+        return mantem(gc, gf, *p_lo)[0], mantem(gc, gf, *p_hi)[0]
+    return p_lo[idx], p_hi[idx]
+
+
+# ----------------------------------------------------- correcao de calibracao (loop E)
+CORR_PATH = os.path.join(PASTA, "calibracao_correcao.json")
+
+
+def carregar_correcao(path=CORR_PATH):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"metodo": "identidade"}
+
+
+def aplicar_correcao(p, corr):
+    """Mapa P_raw->P_calib do recalibrar_sinais.py. Identidade ate ter dados (n<40).
+    Mesmo algoritmo do aplicarCorrecao() no alertador_valor.js (paridade)."""
+    if not corr or corr.get("metodo", "identidade") == "identidade":
+        return p
+    if corr.get("_meta", {}).get("n_settled", 0) < 40:
+        return p
+    metodo, q = corr["metodo"], p
+    if metodo == "platt" and corr.get("a") is not None:
+        z = max(-30.0, min(30.0, corr["a"] * p + corr["b"]))
+        q = 1.0 / (1.0 + math.exp(z))
+    elif metodo == "isotonic" and corr.get("pontos"):
+        pts = corr["pontos"]
+        if p <= pts[0][0]:
+            q = pts[0][1]
+        elif p >= pts[-1][0]:
+            q = pts[-1][1]
+        else:
+            for i in range(1, len(pts)):
+                if p <= pts[i][0]:
+                    x0, y0 = pts[i - 1]; x1, y1 = pts[i]
+                    q = y0 + (y1 - y0) * (p - x0) / ((x1 - x0) or 1.0)
+                    break
+    cap = corr.get("cap", 0.15)             # calibracao e nudge: nao afasta mais que isto do cru
+    q = max(p - cap, min(p + cap, q))
+    return max(0.01, min(0.99, q))
 
 
 def forca_time_db(evento_id):
@@ -278,6 +328,16 @@ def main():
     pc, pe, pf = probabilidades(a.min, a.casa, a.fora, cal, **kw)
     pm, lab = mantem(a.casa, a.fora, pc, pe, pf)
     blo, bhi = banda_confianca(a.min, a.casa, a.fora, cal, **kw)
+    # (E) correcao de calibracao: aplica no resultado que se mantem + na banda (1X2 acima fica cru)
+    corr = carregar_correcao()
+    corr_on = corr.get("metodo", "identidade") != "identidade" and corr.get("_meta", {}).get("n_settled", 0) >= 40
+    pm = aplicar_correcao(pm, corr); blo = aplicar_correcao(blo, corr); bhi = aplicar_correcao(bhi, corr)
+    # resultado DOMINANTE = o que o alertador aposta/gateia no badge (pode != "se mantem" em jogo aberto)
+    trip = [("CASA", 0, pc), ("EMPATE", 1, pe), ("FORA", 2, pf)]
+    dlab, didx, dprob = max(trip, key=lambda z: z[2])
+    dprob = aplicar_correcao(dprob, corr)
+    dlo, dhi = banda_confianca(a.min, a.casa, a.fora, cal, idx=didx, **kw)
+    dlo = aplicar_correcao(dlo, corr); dhi = aplicar_correcao(dhi, corr)
 
     restante = max(0.0, 90.0 - a.min) + a.acrescimo
     odd = lambda p: f"{1/p:6.2f}" if p > 0 else "  inf"
@@ -297,7 +357,11 @@ def main():
     print(f"  Vitoria fora : {pf*100:6.2f}%   odd justa {odd(pf)}")
     print("-" * 60)
     print(f"  Resultado atual ({lab}) se mantem: {pm*100:5.1f}%  "
-          f"[banda {blo*100:.0f}-{bhi*100:.0f}%]  breakeven {1/pm:.2f}")
+          f"[banda {blo*100:.0f}-{bhi*100:.0f}%]  breakeven {1/pm:.2f}"
+          + ("  (calibrado)" if corr_on else ""))
+    if dlab != lab:   # so quando o dominante difere do placar atual (raro p/ sinal real)
+        print(f"  Dominante ({dlab}) — o que o alertador aposta: {dprob*100:5.1f}%  "
+              f"[banda {dlo*100:.0f}-{dhi*100:.0f}%]  breakeven {1/dprob:.2f}")
     print("Obs: banda larga = entrada incerta. Odd real do bet365 vem com margem (menor).")
 
 

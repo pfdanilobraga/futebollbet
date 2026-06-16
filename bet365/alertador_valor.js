@@ -21,7 +21,7 @@
 // re-calibrar: rode o .py e cole os novos valores no objeto CAL abaixo.
 
 ;(function () {
-  const VERSAO = 'v2.4';   // <- aparece na barra; se nao mostrar isso, e a versao ANTIGA
+  const VERSAO = 'v2.7';   // <- aparece na barra; se nao mostrar isso, e a versao ANTIGA
   // ---------------- calibracao (de hazard_cal.json) ----------------
   const CAL = {
     home_share: 0.5489,
@@ -33,7 +33,7 @@
     stoppage_extra_pmf: [0.45,0.28,0.15,0.08,0.04],
     red: { down: 0.74, up: 1.30 },
     mult: { sigma: 0.35, d0: 1.5, clampLo: 0.45, clampHi: 2.2 },
-    sigma_log: { base: 0.30, sem_stats: 0.10 },
+    sigma_log: { base: 0.30, sem_stats: 0.10, por_mult: 0.15 },
     forca: { minJogos: 3, k: 5.0, wMax: 0.85 },   // shrinkage do blend forca-time
   };
 
@@ -57,9 +57,15 @@
     painel: true,            // momentum pelo painel do bet365 (jogo aberto) — sem API, mesma fonte
     stakeTotal: 10,          // R$ total p/ o calculo de Dutching (cobrir 2 resultados)
     dutch: true,             // mostra o plano de Dutching no badge dos ARM/GREEN
+    usarBanda: true,         // (B) gateia pelo limite INFERIOR da banda (cenario pessimista)
+    vermelho: true,          // (A) le cartao vermelho do DOM e alimenta o modelo
+    valorTier: true,         // (C) habilita o tier VALOR (cedo, mais variancia)
+    valorMin: 75,            // (C) a partir de que minuto o VALOR pode aparecer
+    valorMargin: 0.06,       // (C) prob exigida = probMin + isto (colchao maior que ARM)
+    valorEdge: 0.08,         // (C) margem de valor minima: oddTela/justo >= 1+isto
   };
 
-  const COR = { WATCH:'#6aa0ff', ARM:'#ffb300', GREEN:'#2bd24f', STALE:'#e23b3b' };
+  const COR = { WATCH:'#6aa0ff', VALOR:'#a06bff', ARM:'#ffb300', GREEN:'#2bd24f', STALE:'#e23b3b' };
   let timer = null;
   const ST = (window.__avState = window.__avState || {}); // estado por fixture
 
@@ -100,6 +106,34 @@
       .then(r=>r.json()).then(d=>{ forcaCache[k] = (d && d.lam_casa) ? d : null; }).catch(()=>{});
     return null;
   }
+  // correcao de calibracao (loop E): mapa P_raw->P_calib do recalibrar_sinais.py, servido em /correcao.
+  // Identidade ate ter dados (n_settled<40). Monotono -> nao muda o argmax (qual resultado domina).
+  const corrCache = (window.__avCorr = window.__avCorr || {data:null, ts:0, loading:false});
+  function corrFetch(url, now){
+    if(!url || corrCache.loading || (corrCache.data && (now-corrCache.ts)<300000)) return;  // 5 min
+    corrCache.loading=true;
+    fetch(url+'/correcao', {cache:'no-store'}).then(r=>r.json()).then(d=>{
+      corrCache.data=d||null; corrCache.ts=Date.now(); corrCache.loading=false;
+    }).catch(()=>{ corrCache.loading=false; });
+  }
+  function aplicarCorrecao(p){
+    const c=corrCache.data;
+    if(!c || !c.metodo || c.metodo==='identidade') return p;
+    if(((c._meta&&c._meta.n_settled)||0) < 40) return p;
+    let q=p;
+    if(c.metodo==='platt' && c.a!=null){ q=1/(1+Math.exp(Math.max(-30,Math.min(30, c.a*p+c.b)))); }
+    else if(c.metodo==='isotonic' && c.pontos && c.pontos.length){
+      const pts=c.pontos;
+      if(p<=pts[0][0]) q=pts[0][1];
+      else if(p>=pts[pts.length-1][0]) q=pts[pts.length-1][1];
+      else for(let i=1;i<pts.length;i++){ if(p<=pts[i][0]){
+        const x0=pts[i-1][0], y0=pts[i-1][1], x1=pts[i][0], y1=pts[i][1];
+        q=y0+(y1-y0)*(p-x0)/((x1-x0)||1); break; } }
+    }
+    const cap=(c.cap!=null?c.cap:0.15);     // calibracao e nudge: nao afasta mais que isto do cru
+    q=Math.max(p-cap, Math.min(p+cap, q));
+    return Math.max(0.01, Math.min(0.99, q));
+  }
 
   // ---------------- momentum pelo PAINEL do bet365 (jogo aberto, sem API/SofaScore) ----------
   // Pesos das metricas do painel (sem xG; "Ataques Perigosos" = o sinal que a casa usa).
@@ -137,6 +171,12 @@
     const ph=ss/sw;
     return { casa:Math.max(0.6,Math.min(1.7,Math.exp(0.5*2*(ph-0.5)))),
              fora:Math.max(0.6,Math.min(1.7,Math.exp(0.5*2*(0.5-ph)))), ph:+ph.toFixed(3) };
+  }
+  function lerAcrescimoPainel(){         // (D) "90+N" real do relogio do PAINEL (jogo aberto)
+    const fx=_painelFixture(); if(!fx) return null;
+    const t = txt(fx.querySelector('.ovm-InPlayTimer')) || '';
+    const m = t.match(/90\s*\+\s*(\d+)/);   // so 2T; quem chama ja garante tot>=90
+    return m ? +m[1] : null;
   }
 
   // ---------------- modelo (porta do prob_aovivo.py) ----------------
@@ -199,6 +239,21 @@
     return {lab:c[0][0],prob:c[0][1],idx:c[0][2]};
   }
   function mantemProb(gc,gf,pc,pe,pf){ return gc>gf?pc : gc<gf?pf : pe; }
+  // (B) banda de confianca — porta de prob_aovivo.banda_confianca: escala Λ por exp(±sigma_log).
+  // sigma_log cresce quando falta momentum e quando o multiplicador e forte -> banda mais larga.
+  function bandaSigmaLog(o,Mc,Mf){
+    const sl=CAL.sigma_log; let s=sl.base;
+    if((o.momC||1)===1 && (o.momF||1)===1) s+=(sl.sem_stats||0);
+    if(Math.abs(Math.log(Mc||1))>0.2 || Math.abs(Math.log(Mf||1))>0.2) s+=(sl.por_mult||0);
+    return s;
+  }
+  function bandaProbsIdx(m,gc,gf,A,o,idx){   // -> [pLo,pHi] do resultado idx (0=1,1=X,2=2)
+    const [Mc,Mf]=mults(gc,gf,m,Math.max(0,90-m)+A,o.momC,o.momF,o.redC,o.redF);
+    const s=bandaSigmaLog(o,Mc,Mf);
+    const lo=probs(m,gc,gf,A,Object.assign({},o,{escala:(o.escala||1)*Math.exp(+s)}));  // Λ maior -> P menor
+    const hi=probs(m,gc,gf,A,Object.assign({},o,{escala:(o.escala||1)*Math.exp(-s)}));
+    return [lo[idx], hi[idx]];
+  }
   // Dutching: cobre os 2 resultados de MENOR odd, dividindo `stake` pra retorno igual
   // se qualquer um dos 2 sair. Voce PERDE tudo se sair o 3o. Por isso o que importa
   // NAO e "lucro se cobrir", e o EV REAL = (1 - P_excluido)*retorno - stake (P do modelo).
@@ -222,6 +277,30 @@
     for(const e of fx.querySelectorAll('*')){ if(e.children.length) continue;
       const t=txt(e); const m=t.match(/^\+\s?(\d+)/); if(m) return +m[1]; }
     return null;
+  }
+  // (A) cartao vermelho por lado. Layout bet365: casa=linha de cima, fora=linha de baixo;
+  // separa o marcador pela posicao vertical (top) relativa aos 2 TeamName. Defensivo:
+  // se nao da p/ separar com confianca, devolve 0/0 (= comportamento atual, nunca chuta lado).
+  function lerVermelhos(fx){
+    const tn=[...fx.querySelectorAll('[class*="TeamName"]')];
+    if(tn.length<2 || !fx.getBoundingClientRect) return {redC:0,redF:0};
+    const yc=tn[0].getBoundingClientRect().top, yf=tn[1].getBoundingClientRect().top;
+    if(yc===yf) return {redC:0,redF:0};
+    const meio=(yc+yf)/2, casaEmCima=yc<yf;
+    const lado=(el)=>{ const r=el.getBoundingClientRect&&el.getBoundingClientRect();
+      if(!r||!r.height) return null; return ((r.top<=meio)===casaEmCima)?'c':'f'; };
+    const sig=(el)=>{ const cls=(el.className&&el.className.baseVal!==undefined)?el.className.baseVal:(''+(el.className||''));
+      const al=((el.getAttribute&&(el.getAttribute('aria-label')||el.getAttribute('title')))||'');
+      return /red.?card|card.?red|redcard/i.test(cls) || /red card|cart[aã]o vermelho|expuls/i.test(al); };
+    let rc=0, rf=0; const vistos=new Set();
+    const add=(el,n)=>{ const L=lado(el); if(L==='c') rc+=n; else if(L==='f') rf+=n; };
+    fx.querySelectorAll('[class],[aria-label],[title]').forEach(el=>{
+      if(vistos.has(el)||!sig(el)) return; vistos.add(el); add(el,1); });
+    fx.querySelectorAll('*').forEach(el=>{ if(el.children.length||vistos.has(el)) return;
+      if(el.closest('[class*="TeamName"]')) return;
+      if([...vistos].some(v=>v.contains&&v.contains(el))) return;   // ja contado via ancestral -> nao duplica
+      const n=((el.textContent||'').match(/🟥/g)||[]).length; if(n){ vistos.add(el); add(el,n); } });
+    return {redC:Math.min(2,rc), redF:Math.min(2,rf)};
   }
 
   // ---------------- freshness ----------------
@@ -277,8 +356,9 @@
 
   // ---------------- scan ----------------
   function scan(cfg, now){
-    let cont={IDLE:0,WATCH:0,ARM:0,GREEN:0,STALE:0};
+    let cont={IDLE:0,WATCH:0,VALOR:0,ARM:0,GREEN:0,STALE:0};
     ssFetch(cfg.ssUrl, now);                 // atualiza o cross do SofaScore (async)
+    corrFetch(cfg.ssUrl, now);               // (E) atualiza o mapa de correcao de calibracao
     const pn = cfg.painel ? lerPainel() : null;          // momentum do jogo ABERTO no painel
     const pnMom = pn ? momentumPainel(pn.stats) : null;
     const pnC = pn ? normalizarTime(pn.casa) : '', pnF = pn ? normalizarTime(pn.fora) : '';
@@ -309,7 +389,10 @@
 
         const st = ST[key] = ST[key] || {};
         const ss = ssLookup(nomes[0], nomes[1]);
-        const A = (ss && ss.injury!=null) ? ss.injury : lerAcrescimo(fx);
+        let A = (ss && ss.injury!=null) ? ss.injury : lerAcrescimo(fx);
+        // (D) se for o jogo ABERTO no painel e ja passou de 90', le o "90+N" real do painel
+        if(A==null && pn && relogio.tot>=90 && pnC===normalizarTime(nomes[0]) && pnF===normalizarTime(nomes[1]))
+          A = lerAcrescimoPainel();
         const fr = freshness(st, relogio, oddsCount, A, cfg, ss);
 
         if(fr.stale){ limpa(fx); pinta(fx, COR.STALE, false, 'STALE '+fr.stale, -1);
@@ -321,31 +404,49 @@
         if(pnMom && pnC===normalizarTime(nomes[0]) && pnF===normalizarTime(nomes[1])){
           momC=pnMom.casa; momF=pnMom.fora;
         }
+        // (A) cartao vermelho: lido do DOM (auditavel no badge 🟥); fallback SofaScore
+        let redC=0, redF=0;
+        if(cfg.vermelho){ const rv=lerVermelhos(fx); redC=rv.redC; redF=rv.redF;
+          if(!redC && !redF && ss && ss.redC!=null){ redC=ss.redC; redF=ss.redF; } }
         const forca = forcaLocal(cfg.ssUrl, nomes[0], nomes[1]) || (ss?ss.forca:null);  // FBref local > SofaScore
-        const [pc,pe,pf]=probs(relogio.tot, pl[0], pl[1], A!=null?A:cfg.unknownStoppageFloor,
-                               {momC, momF, redC:0, redF:0, forca});
+        const Aeff = A!=null?A:cfg.unknownStoppageFloor;
+        const oModel = {momC, momF, redC, redF, forca};
+        const [pc,pe,pf]=probs(relogio.tot, pl[0], pl[1], Aeff, oModel);
         const dom=dominante(pl[0],pl[1],pc,pe,pf);
-        const be=1/dom.prob, oddTela=odds[dom.idx];
+        // (B) banda de confianca p/ o resultado dominante; (E) correcao de calibracao (monotona)
+        let pLo=dom.prob, pHi=dom.prob;
+        if(cfg.usarBanda){ const bb=bandaProbsIdx(relogio.tot, pl[0], pl[1], Aeff, oModel, dom.idx);
+          pLo=bb[0]; pHi=bb[1]; }
+        const domProb=aplicarCorrecao(dom.prob); pLo=aplicarCorrecao(pLo); pHi=aplicarCorrecao(pHi);
+        const be=1/domProb, oddTela=odds[dom.idx];
         const valor=(oddTela!=null)&&(oddTela>be);
         const mercadoOk=oddsCount>=3 && (!cfg.exigeOddAtiva || oddTela!=null);
+        const gateProb=cfg.usarBanda?pLo:domProb;   // (B) gating pelo limite inferior se banda ON
 
         // tiers
         const greenMin = (A!=null) ? 90+Math.max(0,A-cfg.greenBuffer) : 90+cfg.unknownStoppageFloor;
         const greenCeil = (A!=null) ? 90+A+cfg.greenOvershoot : 90+cfg.hardCeiling;
         const noSurge = (st.lastScore===undefined || st.lastScore===pl.join('-'))
                         && (st.lastOdds===undefined || !(st.lastOdds<3 && oddsCount>=3)); // sem flap
-        const armOk = relogio.tot>=cfg.armMin && dom.prob>=cfg.probMin && valor && mercadoOk && fr.ok;
+        const armOk = relogio.tot>=cfg.armMin && gateProb>=cfg.probMin && valor && mercadoOk && fr.ok;
         const greenCond = armOk && relogio.tot>=greenMin && relogio.tot<=greenCeil
                           && fr.strict && noSurge && mercadoOk;
         st.green = greenCond ? (st.green||0)+1 : 0;
         const isGreen = st.green>=cfg.confirmScans;
+        // (C) tier VALOR — cedo, mais variancia: so ANTES da janela ARM, exige colchao + margem de valor
+        const edgeOk = (oddTela!=null) && be>0 && (oddTela/be)>=(1+cfg.valorEdge);
+        const valorOk = cfg.valorTier && !armOk && !isGreen && relogio.tot>=cfg.valorMin
+                        && gateProb>=(cfg.probMin+cfg.valorMargin) && edgeOk && mercadoOk && fr.ok;
 
-        let tier = isGreen?'GREEN' : armOk?'ARM' : 'WATCH';
+        let tier = isGreen?'GREEN' : armOk?'ARM' : valorOk?'VALOR' : 'WATCH';
         const tela = oddTela!=null?oddTela.toFixed(2):'susp';
         const aTxt = A!=null?('+'+A):'+?';
         const motivo = !mercadoOk?' SUSPENSO' : (!noSurge?' GOL?' : '');
-        let txtBadge = `${tier}${tier==='ARM'?motivo:''} ${dom.lab} ${(dom.prob*100).toFixed(0)}%`
-                       + ` | just ${be.toFixed(2)} | tela ${tela} ${valor?'✓':'✗'} | ${aTxt}`;
+        const banda = cfg.usarBanda?` [${(pLo*100).toFixed(0)}–${(pHi*100).toFixed(0)}%]`:'';
+        const reds = (redC||redF)?` 🟥${redC}-${redF}`:'';
+        let txtBadge = `${tier}${tier==='ARM'?motivo:''} ${dom.lab} ${(domProb*100).toFixed(0)}%${banda}`
+                       + ` | just ${be.toFixed(2)} | tela ${tela} ${valor?'✓':'✗'} | ${aTxt}${reds}`;
+        if(tier==='VALOR') txtBadge += ` · valor +${((oddTela/be-1)*100).toFixed(0)}% (cedo, +variância)`;
         if(cfg.dutch && (tier==='ARM'||tier==='GREEN')){          // plano de Dutching (cobrir 2)
           const dt=dutch(odds, [pc,pe,pf], cfg.stakeTotal);
           if(dt){ const pA=Math.round(dt.a.stake/cfg.stakeTotal*100), pB=Math.round(dt.b.stake/cfg.stakeTotal*100);
@@ -378,21 +479,98 @@
     if(!bar){ bar=document.createElement('div'); bar.id='__avBar';
       bar.style.cssText='position:fixed;bottom:10px;right:10px;z-index:99999;background:#111;'
         +'color:#fff;border:1px solid #444;font:bold 12px sans-serif;padding:8px 12px;border-radius:6px;line-height:1.4';
+      // linha de status (atualizada a cada scan)
+      const status=document.createElement('div'); status.id='__avBarStatus';
+      // linha de AJUSTES (criada UMA vez — nao reescreve a cada scan, senao perde o foco/valor)
+      const row=document.createElement('div'); row.id='__avBarCfg';
+      row.style.cssText='margin-top:6px;padding-top:6px;border-top:1px solid #333;font-weight:normal;'
+        +'display:flex;gap:10px;align-items:center;flex-wrap:wrap';
+      const mkInput=(val,w,title)=>{ const i=document.createElement('input');
+        i.type='number'; i.value=val; i.title=title||'';
+        i.style.cssText='width:'+w+';background:#222;color:#fff;border:1px solid #555;border-radius:3px;'
+          +'padding:1px 4px;font:bold 11px sans-serif;text-align:right'; return i; };
+      // 💰 valor total p/ Dutching
+      const sStake=document.createElement('span'); sStake.style.cssText='display:inline-flex;align-items:center;gap:3px';
+      const iStake=mkInput(cfg.stakeTotal,'52px','Valor total p/ o Dutching. As % valem p/ QUALQUER valor.');
+      iStake.min='1'; iStake.step='5';
+      iStake.onchange=()=>{ const v=parseFloat(iStake.value); if(v>0){ cfg.stakeTotal=v; saveLS(cfg); } else iStake.value=cfg.stakeTotal; };
+      sStake.innerHTML='💰 R$'; sStake.appendChild(iStake);
+      // ⏱ a partir de que minuto avisa (menor = mais cedo = mais tempo)
+      const sArm=document.createElement('span'); sArm.style.cssText='display:inline-flex;align-items:center;gap:3px';
+      const iArm=mkInput(cfg.armMin,'38px','A partir de que minuto pode avisar. Menor = mais cedo = mais tempo (88 normal, 84 mais cedo).');
+      iArm.min='70'; iArm.max='95'; iArm.step='1';
+      iArm.onchange=()=>{ let v=parseInt(iArm.value,10); if(!(v>=70&&v<=95)){ iArm.value=cfg.armMin; return; }
+        cfg.armMin=v; cfg.watchMin=Math.min(DEF.watchMin,v); cfg.greenBuffer=v<88?2.5:1.0; cfg.unknownStoppageFloor=v<88?1:2; saveLS(cfg); };
+      sArm.innerHTML='⏱ avisa ≥'; sArm.appendChild(iArm); sArm.appendChild(document.createTextNode("'"));
+      // ✓ banda — gating pelo cenario pessimista (B)
+      const sBanda=document.createElement('span'); sBanda.style.cssText='display:inline-flex;align-items:center;gap:3px';
+      const iBanda=document.createElement('input'); iBanda.type='checkbox'; iBanda.checked=!!cfg.usarBanda;
+      iBanda.title='Trava pelo limite INFERIOR da banda — mais preciso; exige colchao maior quanto mais cedo.';
+      iBanda.style.accentColor='#a06bff';
+      iBanda.onchange=()=>{ cfg.usarBanda=iBanda.checked; saveLS(cfg); };
+      sBanda.appendChild(iBanda); sBanda.appendChild(document.createTextNode('banda'));
+      // 🎯 margem do tier VALOR cedo (C), em pontos %
+      const sVal=document.createElement('span'); sVal.style.cssText='display:inline-flex;align-items:center;gap:3px';
+      const iVal=mkInput(Math.round(cfg.valorMargin*100),'34px','Tier VALOR cedo: prob exigida = probMin + isto (pontos %). Maior = mais exigente.');
+      iVal.min='0'; iVal.max='25'; iVal.step='2';
+      iVal.onchange=()=>{ let v=parseInt(iVal.value,10); if(!(v>=0&&v<=25)){ iVal.value=Math.round(cfg.valorMargin*100); return; }
+        cfg.valorMargin=v/100; saveLS(cfg); };
+      sVal.innerHTML='🎯 +'; sVal.appendChild(iVal); sVal.appendChild(document.createTextNode('pp'));
+      // ↺ volta ao padrao
+      const reset=document.createElement('span'); reset.textContent='↺ padrão';
+      reset.style.cssText='color:#6aa0ff;cursor:pointer;font-size:11px';
+      reset.title='Limpa os ajustes salvos e volta ao padrao';
+      reset.onclick=()=>{ try{localStorage.removeItem(LS_KEY);}catch(e){}
+        cfg.stakeTotal=DEF.stakeTotal; cfg.armMin=DEF.armMin; cfg.watchMin=DEF.watchMin;
+        cfg.greenBuffer=DEF.greenBuffer; cfg.unknownStoppageFloor=DEF.unknownStoppageFloor;
+        cfg.usarBanda=DEF.usarBanda; cfg.valorMargin=DEF.valorMargin;
+        iStake.value=DEF.stakeTotal; iArm.value=DEF.armMin;
+        iBanda.checked=DEF.usarBanda; iVal.value=Math.round(DEF.valorMargin*100); };
+      row.appendChild(sStake); row.appendChild(sArm); row.appendChild(sBanda);
+      row.appendChild(sVal); row.appendChild(reset);
+      bar.appendChild(status); bar.appendChild(row);
       document.body.appendChild(bar); }
+    let status=bar.querySelector('#__avBarStatus');
+    if(!status){ bar.remove(); return barra(c,cfg,aviso); }   // barra velha (reinjecao s/ F5) -> reconstroi
+    const corr = (corrCache.data && corrCache.data.metodo && corrCache.data.metodo!=='identidade'
+                  && ((corrCache.data._meta&&corrCache.data._meta.n_settled)||0)>=40) ? ' · calib✓' : '';
     const linha2 = aviso
       ? `<span style="color:${COR.STALE}">⚠️ ${aviso}</span>`
-      : `arm≥${cfg.armMin}' prob≥${cfg.probMin} · SofaScore: `
+      : `arm≥${cfg.armMin}' prob≥${cfg.probMin}${cfg.usarBanda?' (banda)':''}${corr} · SofaScore: `
         + (cfg.ssUrl ? (Object.keys(ssCache.data).length+' jogos') : 'off');
-    bar.innerHTML=`<span style="color:#33d17a;font-weight:bold">${VERSAO}</span>  `
+    status.innerHTML=`<span style="color:#33d17a;font-weight:bold">${VERSAO}</span>  `
       +`<span style="color:${COR.GREEN}">GREEN ${c.GREEN}</span> · `
       +`<span style="color:${COR.ARM}">ARM ${c.ARM}</span> · `
+      +`<span style="color:${COR.VALOR}">VALOR ${c.VALOR}</span> · `
       +`<span style="color:${COR.WATCH}">WATCH ${c.WATCH}</span> · `
       +`<span style="color:${COR.STALE}">STALE ${c.STALE}</span><br>`+linha2;
   }
 
+  // ---------------- prefs do usuario (salvas no navegador, sobrevivem ao F5) --
+  // O valor (R$) e o tempo (a partir de que minuto avisa) sao editaveis na
+  // BARRINHA — nao precisa mexer no codigo nem regerar o bookmarklet.
+  const LS_KEY = '__avCfg';
+  function loadLS(){
+    try{ const o=JSON.parse(localStorage.getItem(LS_KEY)||'{}'); const r={};
+      if(o.stakeTotal>0) r.stakeTotal=+o.stakeTotal;
+      if(o.armMin>=70 && o.armMin<=95){ r.armMin=+o.armMin;       // menor = avisa mais cedo
+        r.watchMin = Math.min(DEF.watchMin, r.armMin);            // WATCH tem que descer junto, senao bloqueia
+        r.greenBuffer = r.armMin<88 ? 2.5 : 1.0;                  // GREEN tambem entra mais cedo
+        r.unknownStoppageFloor = r.armMin<88 ? 1 : 2; }
+      if(typeof o.usarBanda==='boolean') r.usarBanda=o.usarBanda;        // (B) toggle da banda
+      if(o.valorMargin>=0 && o.valorMargin<=0.25) r.valorMargin=+o.valorMargin;  // (C) margem VALOR
+      return r;
+    }catch(e){ return {}; }
+  }
+  function saveLS(cfg){
+    try{ localStorage.setItem(LS_KEY, JSON.stringify(
+      {stakeTotal:cfg.stakeTotal, armMin:cfg.armMin,
+       usarBanda:cfg.usarBanda, valorMargin:cfg.valorMargin})); }catch(e){}
+  }
+
   // ---------------- API ----------------
   window.iniciarValor = function(over){
-    const cfg=Object.assign({}, DEF, over||{});
+    const cfg=Object.assign({}, DEF, over||{}, loadLS());   // prefs da tela vencem o baked
     window.pararValor();
     ensureCSS();
     const tick=()=>scan(cfg, Date.now());
