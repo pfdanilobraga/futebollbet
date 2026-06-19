@@ -17,9 +17,19 @@ Features produzidas (todas NULL-safe — viram NaN quando faltam dados):
     - h2h_saldo .......................... (vitórias casa - vitórias fora) em jogos anteriores entre eles
   Mercado (quando há odds coletadas):
     - imp_casa, imp_empate, imp_fora ..... probabilidade implícita das odds (sem margem)
+    - tem_odds ........................... 1 se há odds 1X2; 0 caso contrário (separa o
+                                           regime sem-mercado, evitando que a imputação
+                                           injete sinal de mercado falso)
   Elenco / xG (entram automaticamente quando `escalacao` / `chute` forem coletados):
     - nota_xi_casa, nota_xi_fora ......... nota média do XI titular (média histórica dos titulares)
     - xg_casa, xg_fora ................... xG médio criado nos últimos jogos (mando)
+  Rating dinâmico (pi-ratings, Constantinou & Fenton 2013):
+    - pi_casa ............................ rating de CASA do mandante (R_H)
+    - pi_fora ............................ rating de FORA do visitante (R_A)
+    - pi_exp_gd .......................... diferença de gols esperada do confronto
+                                           (ajusta pela força do adversário — o que médias
+                                           de 5 jogos ignoram; com retornos decrescentes na
+                                           margem). NaN nos primeiros jogos de cada time.
 
 Alvo (target): resultado 1X2 -> classe 'H' (casa), 'D' (empate), 'A' (fora).
 """
@@ -28,6 +38,13 @@ import sqlite3
 from collections import defaultdict
 
 JANELA_RECENTE = 5          # nº de jogos para médias "recentes"
+
+# pi-ratings (Constantinou & Fenton 2013) — parâmetros tunados da literatura
+PI_LAMBDA = 0.035           # taxa de aprendizado do rating do mando direto
+PI_GAMMA = 0.7              # fração do ajuste propagada ao rating do outro mando
+PI_C = 3.0                  # escala da função de retornos decrescentes
+PI_B = 10.0                 # base do log/exp
+PI_MIN_JOGOS = 5            # cold-start: rating só "confiável" após N jogos do time
 
 
 # ----------------------------------------------------------------- util odds
@@ -51,18 +68,28 @@ class HistoricoLiga:
 
     def __init__(self, con):
         self.con = con
-        # cache de nota média histórica do jogador (média móvel de notas em escalacao)
-        self._nota_jogador = self._carregar_notas_jogador()
+        # notas individuais por evento; só são CONSUMIDAS via registrar() em ordem
+        # cronológica (anti-vazamento — a média histórica do jogador nunca enxerga
+        # o jogo atual nem jogos futuros).
+        self._notas_por_evento = self._carregar_notas_por_evento()
+        # acumulador incremental: jogador_id -> [soma_notas, n_jogos] já vistos
+        self._nota_acum = defaultdict(lambda: [0.0, 0])
         self._xg_evento = self._carregar_xg_evento()
         # por time -> lista de dicts {ts, mando, gf, ga, pts, adversario, evento_id}
         self.por_time = defaultdict(list)
+        # pi-ratings: time_id -> [R_casa, R_fora, n_jogos] (atualizado em registrar)
+        # chavear por time já separa as ligas — cada time só joga na própria.
+        self._pi = defaultdict(lambda: [0.0, 0.0, 0])
 
-    def _carregar_notas_jogador(self):
-        d = {}
-        for jid, nota in self.con.execute(
-                "SELECT jogador_id, AVG(nota) FROM escalacao "
-                "WHERE nota IS NOT NULL GROUP BY jogador_id"):
-            d[jid] = nota
+    def _carregar_notas_por_evento(self):
+        """evento_id -> [(jogador_id, nota), ...]. Carregar é leitura pura de dados;
+        a garantia de zero-vazamento vem de só agregar essas notas em registrar(),
+        que roda em ordem cronológica e depois de já calcular as features do jogo."""
+        d = defaultdict(list)
+        for eid, jid, nota in self.con.execute(
+                "SELECT evento_id, jogador_id, nota FROM escalacao "
+                "WHERE nota IS NOT NULL"):
+            d[eid].append((jid, nota))
         return d
 
     def _carregar_xg_evento(self):
@@ -103,13 +130,46 @@ class HistoricoLiga:
         return c - f
 
     def _nota_xi(self, evento_id, time_id):
-        notas = [self._nota_jogador.get(jid)
-                 for (jid,) in self.con.execute(
-                     "SELECT jogador_id FROM escalacao "
-                     "WHERE evento_id=? AND time_id=? AND titular=1",
-                     (evento_id, time_id))]
-        notas = [n for n in notas if n]
+        """Nota média histórica dos 11 titulares deste jogo, usando só a média
+        acumulada de jogos ANTERIORES de cada jogador (sem vazamento)."""
+        notas = []
+        for (jid,) in self.con.execute(
+                "SELECT jogador_id FROM escalacao "
+                "WHERE evento_id=? AND time_id=? AND titular=1",
+                (evento_id, time_id)):
+            soma, n = self._nota_acum[jid]
+            if n:
+                notas.append(soma / n)
         return sum(notas) / len(notas) if notas else None
+
+    @staticmethod
+    def _pi_gd(R):
+        """Converte um rating pi em diferença de gols esperada (inverso de psi),
+        com retornos decrescentes: gd = sign(R)*(b^(|R|/c) - 1)."""
+        g = PI_B ** (abs(R) / PI_C) - 1.0
+        return g if R >= 0 else -g
+
+    def _pi_features(self, casa, fora):
+        """(pi_casa, pi_fora, pi_exp_gd) ou (None,None,None) em cold-start."""
+        rc, rf = self._pi[casa], self._pi[fora]
+        if rc[2] < PI_MIN_JOGOS or rf[2] < PI_MIN_JOGOS:
+            return None, None, None
+        exp_gd = self._pi_gd(rc[0]) - self._pi_gd(rf[1])
+        return rc[0], rf[1], exp_gd
+
+    def _pi_atualizar(self, casa, fora, gc, gf):
+        """Atualiza os pi-ratings após uma partida (chamado em registrar)."""
+        rc, rf = self._pi[casa], self._pi[fora]
+        ghat = self._pi_gd(rc[0]) - self._pi_gd(rf[1])     # gd esperado (casa-fora)
+        e = (gc - gf) - ghat                                # erro (perspectiva da casa)
+        passo = PI_LAMBDA * PI_C * math.log10(1 + abs(e)) * (1 if e >= 0 else -1)
+        rc0, rf1 = rc[0], rf[1]
+        rc[0] = rc0 + passo                                 # R_casa do mandante
+        rc[1] = rc[1] + PI_GAMMA * (rc[0] - rc0)            # propaga ao R_fora dele
+        rf[1] = rf1 - passo                                 # R_fora do visitante
+        rf[0] = rf[0] + PI_GAMMA * (rf[1] - rf1)            # propaga ao R_casa dele
+        rc[2] += 1
+        rf[2] += 1
 
     def _xg_recente(self, time_id, mando):
         """xG médio criado nos últimos jogos no mando (precisa de chute coletado)."""
@@ -130,6 +190,7 @@ class HistoricoLiga:
         ult_casa = hc[-1]["ts"] if hc else None
         ult_fora = hf[-1]["ts"] if hf else None
         imp = _implicitas(self.con, ev["id"])
+        pi_casa, pi_fora, pi_exp_gd = self._pi_features(casa, fora)
         return {
             "ppg_casa_mando":  self._ppg(hc, "casa"),
             "ppg_fora_mando":  self._ppg(hf, "fora"),
@@ -145,10 +206,12 @@ class HistoricoLiga:
             "descanso_fora": (ts - ult_fora) / 86400 if ult_fora else None,
             "h2h_saldo": self._h2h_saldo(casa, fora, ts),
             "imp_casa": imp[0], "imp_empate": imp[1], "imp_fora": imp[2],
+            "tem_odds": 1.0 if imp[0] is not None else 0.0,
             "nota_xi_casa": self._nota_xi(ev["id"], casa),
             "nota_xi_fora": self._nota_xi(ev["id"], fora),
             "xg_casa": self._xg_recente(casa, "casa"),
             "xg_fora": self._xg_recente(fora, "fora"),
+            "pi_casa": pi_casa, "pi_fora": pi_fora, "pi_exp_gd": pi_exp_gd,
         }
 
     # ---- registra o RESULTADO de uma partida no histórico ----
@@ -164,14 +227,22 @@ class HistoricoLiga:
         self.por_time[ev["fora_id"]].append(dict(
             ts=ev["inicio_ts"], mando="fora", gf=gf, ga=gc, saldo=gf - gc,
             pts=pts_fora, adversario=ev["casa_id"], evento_id=ev["id"]))
+        # acumula as notas individuais DESTE jogo — passam a contar só para os
+        # PRÓXIMOS jogos de cada jogador (entra depois de features() ter rodado)
+        for jid, nota in self._notas_por_evento.get(ev["id"], ()):
+            self._nota_acum[jid][0] += nota
+            self._nota_acum[jid][1] += 1
+        # atualiza pi-ratings com o resultado deste jogo (também pós-features)
+        self._pi_atualizar(ev["casa_id"], ev["fora_id"], gc, gf)
 
 
 COLUNAS = [
     "ppg_casa_mando", "ppg_fora_mando", "gf_casa", "ga_casa", "gf_fora", "ga_fora",
     "ppg5_casa", "ppg5_fora", "forma5_casa", "forma5_fora",
     "descanso_casa", "descanso_fora", "h2h_saldo",
-    "imp_casa", "imp_empate", "imp_fora",
+    "imp_casa", "imp_empate", "imp_fora", "tem_odds",
     "nota_xi_casa", "nota_xi_fora", "xg_casa", "xg_fora",
+    "pi_casa", "pi_fora", "pi_exp_gd",
 ]
 
 

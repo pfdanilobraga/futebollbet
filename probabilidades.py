@@ -5,7 +5,10 @@ Cálculo de probabilidades de vitória a partir do futebol.db
 Modelos:
   1. odds_implicitas — converte as odds 1X2 em probabilidade (remove margem da casa)
   2. poisson         — força de ataque/defesa por gols marcados/sofridos (casa/fora)
-  3. combinado       — média ponderada (70% odds, 30% poisson, ajustável)
+  3. combinado       — pool LOGARÍTMICO (geométrico) das probabilidades:
+                       p ∝ p_odds^w · p_poisson^(1-w), renormalizado (w=PESO_ODDS).
+                       Superior à média linear (não fica sub-confiante). Onde não há
+                       odds, só o 'poisson' é gravado (equivale a w=1, só modelo).
 
 Uso:
   py probabilidades.py evento 15526121          # uma partida
@@ -110,6 +113,16 @@ def prob_poisson(con, evento_id):
             {"lambda_casa": round(lam_casa, 3), "lambda_fora": round(lam_fora, 3)})
 
 
+# ------------------------------------------------------------ blend
+def blend_loglinear(p_odds, p_pois, w):
+    """Pool logarítmico (geométrico): p_k ∝ p_odds_k^w · p_pois_k^(1-w).
+    Externamente bayesiano e menos sub-confiante que a média linear."""
+    out = [(max(a, 1e-12) ** w) * (max(b, 1e-12) ** (1 - w))
+           for a, b in zip(p_odds, p_pois)]
+    s = sum(out)
+    return tuple(o / s for o in out)
+
+
 # ------------------------------------------------------------ orquestração
 def gravar(con, evento_id, modelo, res):
     p1, px, p2, det = res
@@ -147,10 +160,9 @@ def calcular_evento(con, evento_id, verboso=True):
     if r_pois:
         gravar(con, evento_id, "poisson", r_pois)
     if r_odds and r_pois:
-        comb = tuple(PESO_ODDS * a + (1 - PESO_ODDS) * b
-                     for a, b in zip(r_odds[:3], r_pois[:3]))
+        comb = blend_loglinear(r_odds[:3], r_pois[:3], PESO_ODDS)
         gravar(con, evento_id, "combinado",
-               (*comb, {"peso_odds": PESO_ODDS}))
+               (*comb, {"peso_odds": PESO_ODDS, "blend": "log-linear"}))
     con.commit()
 
     if verboso:

@@ -57,6 +57,11 @@ def prever_evento(con, modelo, evento_id, verboso=True):
          for i in range(len(modelo["classes"]))}
     # garante ordem H/D/A
     pc, pe, pf = p.get("H", 0), p.get("D", 0), p.get("A", 0)
+    # temperature scaling (mesma calibração avaliada no walk-forward)
+    T = modelo.get("temperatura", 1.0)
+    if T and T != 1.0:
+        v = np.clip(np.array([pc, pe, pf], dtype=float), 1e-12, None) ** (1.0 / T)
+        pc, pe, pf = (v / v.sum())
 
     con.execute(
         """INSERT INTO probabilidade

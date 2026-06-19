@@ -12,6 +12,7 @@ logsbackfill-incidentes.log
 
 # --- Derivados / regeneráveis ---
 modelo.joblib
+oof_preds.csv
 __pycache__/
 *.pyc
 *.pyo
