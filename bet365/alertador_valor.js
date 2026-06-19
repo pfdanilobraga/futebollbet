@@ -21,7 +21,7 @@
 // re-calibrar: rode o .py e cole os novos valores no objeto CAL abaixo.
 
 ;(function () {
-  const VERSAO = 'v2.8';   // <- aparece na barra; se nao mostrar isso, e a versao ANTIGA
+  const VERSAO = 'v2.9d';  // <- aparece na barra; se nao mostrar isso, e a versao ANTIGA (d = tier DUTCH)
   // ---------------- calibracao (de hazard_cal.json) ----------------
   const CAL = {
     home_share: 0.5489,
@@ -63,9 +63,11 @@
     valorMin: 75,            // (C) a partir de que minuto o VALOR pode aparecer
     valorMargin: 0.06,       // (C) prob exigida = probMin + isto (colchao maior que ARM)
     valorEdge: 0.08,         // (C) margem de valor minima: oddTela/justo >= 1+isto
+    dutchTier: true,         // sinaliza TAMBEM quando cobrir as 2 opcoes for +EV (acende as 2 celulas + quanto em cada)
+    dutchEvMin: 0,           // EV minimo (%) do Dutching p/ disparar (0 = qualquer lucro esperado pelo modelo)
   };
 
-  const COR = { WATCH:'#6aa0ff', VALOR:'#a06bff', ARM:'#ffb300', GREEN:'#2bd24f', STALE:'#e23b3b' };
+  const COR = { WATCH:'#6aa0ff', VALOR:'#a06bff', DUTCH:'#00c2b8', ARM:'#ffb300', GREEN:'#2bd24f', STALE:'#e23b3b' };
   let timer = null;
   const ST = (window.__avState = window.__avState || {}); // estado por fixture
 
@@ -263,8 +265,9 @@
     const ord=[0,1,2].sort((a,b)=>odds[a]-odds[b]);
     const a=ord[0], b=ord[1], ex=ord[2];
     const inv=1/odds[a]+1/odds[b], ret=stake/inv, pExcl=p3[ex];
-    return { a:{lab:LAB[a], stake:stake*(1/odds[a])/inv}, b:{lab:LAB[b], stake:stake*(1/odds[b])/inv},
-             excl:LAB[ex], pExcl, ret, seCobrePct:(ret/stake-1)*100,
+    return { a:{lab:LAB[a], idx:a, stake:stake*(1/odds[a])/inv},
+             b:{lab:LAB[b], idx:b, stake:stake*(1/odds[b])/inv},
+             excl:LAB[ex], exclIdx:ex, pExcl, ret, seCobrePct:(ret/stake-1)*100,
              evPct:((1-pExcl)*ret/stake-1)*100 };   // EV real (negativo = nao vale)
   }
 
@@ -347,8 +350,9 @@
     if(!pulse) fx.style.boxShadow='0 0 12px '+cor+'aa';
     limpaCels(fx);                                   // acende a CELULA exata p/ clicar (ARM/GREEN)
     const cells=fx.querySelectorAll('.ovm-ParticipantOddsOnly');
-    if(cellIdx>=0 && cells[cellIdx]){ cells[cellIdx].style.outline='3px solid '+cor;
-      cells[cellIdx].style.boxShadow='inset 0 0 16px '+cor; }
+    const idxs = Array.isArray(cellIdx) ? cellIdx : (cellIdx>=0 ? [cellIdx] : []);
+    idxs.forEach(ci=>{ if(cells[ci]){ cells[ci].style.outline='3px solid '+cor;
+      cells[ci].style.boxShadow='inset 0 0 16px '+cor; } });
     let b=fx.querySelector('.__avBadge');
     if(!b){ b=document.createElement('div'); b.className='__avBadge';
       b.style.cssText='position:absolute;top:2px;left:2px;z-index:9;font:bold 10px sans-serif;'
@@ -360,7 +364,7 @@
 
   // ---------------- scan ----------------
   function scan(cfg, now){
-    let cont={IDLE:0,WATCH:0,VALOR:0,ARM:0,GREEN:0,STALE:0};
+    let cont={IDLE:0,WATCH:0,VALOR:0,DUTCH:0,ARM:0,GREEN:0,STALE:0};
     ssFetch(cfg.ssUrl, now);                 // atualiza o cross do SofaScore (async)
     corrFetch(cfg.ssUrl, now);               // (E) atualiza o mapa de correcao de calibracao
     const pn = cfg.painel ? lerPainel() : null;          // momentum do jogo ABERTO no painel
@@ -411,7 +415,7 @@
         const fr = freshness(st, relogio, oddsCount, A, cfg, ss);
 
         if(fr.stale){ limpa(fx); pinta(fx, COR.STALE, false, 'STALE '+fr.stale, -1);
-          st.lastTot=relogio.tot; st.green=0; cont.STALE++; return; }
+          st.lastTot=relogio.tot; st.green=0; st.dutch=0; cont.STALE++; return; }
 
         // modelo
         // momentum: painel do bet365 (jogo aberto) tem prioridade; senao SofaScore; senao 1.0
@@ -455,31 +459,57 @@
         const valorOk = cfg.valorTier && !armOk && !isGreen && relogio.tot>=cfg.valorMin
                         && gateProb>=(cfg.probMin+cfg.valorMargin) && edgeOk && mercadoOk && fr.ok;
 
-        let tier = isGreen?'GREEN' : armOk?'ARM' : valorOk?'VALOR' : 'WATCH';
+        // DUTCHING como SINAL proprio: cobrir as 2 opcoes de MENOR odd quando isso
+        // for +EV pelo modelo. Usa a banda PESSIMISTA no resultado excluido (mais
+        // provavel do que o ponto) p/ nao sobre-sinalizar. Acende as 2 celulas.
+        let dt=null;
+        if(cfg.dutch || cfg.dutchTier){
+          dt = dutch(odds, [pc,pe,pf], cfg.stakeTotal);
+          if(dt){
+            let pExclEff = dt.pExcl;
+            if(cfg.usarBanda){ const bx=bandaProbsIdx(relogio.tot, pl[0], pl[1], Aeff, oModel, dt.exclIdx);
+              pExclEff = aplicarCorrecao(bx[1]); }      // limite SUPERIOR do excluido = cenario pessimista
+            dt.evEff = ((1-pExclEff)*dt.ret/cfg.stakeTotal - 1)*100;
+          }
+        }
+        const dutchGate = cfg.dutchTier && dt && relogio.tot>=cfg.armMin
+                          && dt.evEff>=cfg.dutchEvMin && mercadoOk && fr.ok && noSurge;
+        st.dutch = (dutchGate && !isGreen) ? (st.dutch||0)+1 : 0;
+        const isDutch = st.dutch>=cfg.confirmScans;
+
+        let tier = isGreen?'GREEN' : isDutch?'DUTCH' : armOk?'ARM' : valorOk?'VALOR' : 'WATCH';
         const tela = oddTela!=null?oddTela.toFixed(2):'susp';
         const aTxt = A!=null?('+'+A):'+?';
         const motivo = !mercadoOk?' SUSPENSO' : (!noSurge?' GOL?' : '');
         const banda = cfg.usarBanda?` [${(pLo*100).toFixed(0)}–${(pHi*100).toFixed(0)}%]`:'';
         const reds = (redC||redF)?` 🟥${redC}-${redF}`:'';
-        let txtBadge = `${tier}${tier==='ARM'?motivo:''} ${dom.lab} ${(domProb*100).toFixed(0)}%${banda}`
-                       + ` | just ${be.toFixed(2)} | tela ${tela} ${valor?'✓':'✗'} | ${aTxt}${reds}`;
-        if(tier==='VALOR') txtBadge += ` · valor +${((oddTela/be-1)*100).toFixed(0)}% (cedo, +variância)`;
-        if(cfg.dutch && (tier==='ARM'||tier==='GREEN')){          // plano de Dutching (cobrir 2)
-          const dt=dutch(odds, [pc,pe,pf], cfg.stakeTotal);
-          if(dt){ const pA=Math.round(dt.a.stake/cfg.stakeTotal*100), pB=Math.round(dt.b.stake/cfg.stakeTotal*100);
-            const lucroCob=dt.ret-cfg.stakeTotal;   // lucro/prejuizo se um dos 2 cobrir
-            txtBadge += `\n💰 R$${dt.a.stake.toFixed(2)} ${dt.a.lab} (${pA}%) + R$${dt.b.stake.toFixed(2)} ${dt.b.lab} (${pB}%)`
-            + ` → volta R$${dt.ret.toFixed(2)} de R$${cfg.stakeTotal} = ${lucroCob>=0?'LUCRO +':'PERDE '}R$${lucroCob.toFixed(2)} se cobrir`
-            + ` · EV ${dt.evPct>=0?'+':''}${dt.evPct.toFixed(1)}%${dt.evPct>0?'✅':''} · perde tudo se ${dt.excl}`;
-          }
+        const linhaDutch = dt ? (()=>{               // "quanto jogar em cada" — sempre que houver plano
+            const pA=Math.round(dt.a.stake/cfg.stakeTotal*100), pB=Math.round(dt.b.stake/cfg.stakeTotal*100);
+            const lucroCob=dt.ret-cfg.stakeTotal;
+            return `\n💰 R$${dt.a.stake.toFixed(2)} ${dt.a.lab} (${pA}%) + R$${dt.b.stake.toFixed(2)} ${dt.b.lab} (${pB}%)`
+              + ` → volta R$${dt.ret.toFixed(2)} de R$${cfg.stakeTotal} = ${lucroCob>=0?'LUCRO +':'PERDE '}R$${lucroCob.toFixed(2)} se cobrir`
+              + ` · EV ${dt.evEff>=0?'+':''}${dt.evEff.toFixed(1)}%${dt.evEff>0?'✅':''} · perde tudo se ${dt.excl}`;
+          })() : '';
+        let txtBadge, cellsToPaint;
+        if(tier==='DUTCH'){                            // sinal das DUAS opcoes
+          txtBadge = `DUTCH ✅ cobre ${dt.a.lab}+${dt.b.lab} · EV +${dt.evEff.toFixed(1)}% | ${aTxt}${reds}` + linhaDutch;
+          cellsToPaint = [dt.a.idx, dt.b.idx];
+        } else {                                       // sinal de UMA opcao (dominante)
+          txtBadge = `${tier}${tier==='ARM'?motivo:''} ${dom.lab} ${(domProb*100).toFixed(0)}%${banda}`
+                     + ` | just ${be.toFixed(2)} | tela ${tela} ${valor?'✓':'✗'} | ${aTxt}${reds}`;
+          if(tier==='VALOR') txtBadge += ` · valor +${((oddTela/be-1)*100).toFixed(0)}% (cedo, +variância)`;
+          if(cfg.dutch && (tier==='ARM'||tier==='GREEN')) txtBadge += linhaDutch;   // dutch como info auxiliar
+          cellsToPaint = tier==='WATCH'?-1:dom.idx;
         }
-        pinta(fx, COR[tier], isGreen, txtBadge, tier==='WATCH'?-1:dom.idx);  // acende a celula 1/X/2
-        if(isGreen && st.green===cfg.confirmScans){          // so na transicao p/ GREEN
+        pinta(fx, COR[tier], isGreen||isDutch, txtBadge, cellsToPaint);
+        if(isGreen && st.green===cfg.confirmScans){          // transicao p/ GREEN (1 opcao) -> loga
           beep();
           logarSinal(cfg.ssUrl, {liga, casa:nomes[0], fora:nomes[1],
             event_id: ss?ss.event_id:null, minuto:+relogio.tot.toFixed(1),
             placar:pl.join('-'), resultado:dom.lab, prob:+dom.prob.toFixed(4),
             breakeven:+be.toFixed(3), odd_tela:oddTela, acrescimo:A});
+        } else if(isDutch && st.dutch===cfg.confirmScans){   // transicao p/ DUTCH (2 opcoes) -> beep
+          beep();                                            // sem log: settlement do dutch != 1X2 do sinal_log
         }
         cont[tier]++;
 
@@ -558,6 +588,7 @@
     status.innerHTML=`<span style="color:#33d17a;font-weight:bold">${VERSAO}</span>  `
       +`<span style="color:${COR.GREEN}">GREEN ${c.GREEN}</span> · `
       +`<span style="color:${COR.ARM}">ARM ${c.ARM}</span> · `
+      +`<span style="color:${COR.DUTCH}">DUTCH ${c.DUTCH}</span> · `
       +`<span style="color:${COR.VALOR}">VALOR ${c.VALOR}</span> · `
       +`<span style="color:${COR.WATCH}">WATCH ${c.WATCH}</span> · `
       +`<span style="color:${COR.STALE}">STALE ${c.STALE}</span><br>`+linha2;
