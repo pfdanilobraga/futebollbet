@@ -110,6 +110,23 @@ def calibrar(db):
     n_red = one("SELECT COUNT(*) FROM incidente WHERE tipo='card' "
                 "AND (detalhe LIKE '%red%' OR detalhe='yellowRed')")[0]
 
+    # distribuição EMPÍRICA do timing dos gols de acréscimo (minuto absoluto).
+    # NÃO é a PMF do modelo (que é "extra ALÉM do anunciado", S=A+x) — para
+    # calibrar aquela precisamos do injuryTime anunciado, que o banco não tem.
+    # Medir aqui torna visível a cauda real (gols em 90+5..+15) que o prior
+    # trunca em +4. Serve de referência p/ a calibração futura.
+    def _timing(minuto_base):
+        rows = c.execute(
+            "SELECT acrescimo, COUNT(*) FROM incidente WHERE tipo='goal' "
+            "AND minuto=? AND acrescimo>0 GROUP BY acrescimo ORDER BY acrescimo",
+            (minuto_base,)).fetchall()
+        tot = sum(n for _, n in rows)
+        dist = {int(a): round(n / tot, 4) for a, n in rows} if tot else {}
+        alem4 = round(sum(n for a, n in rows if a > 4) / tot, 4) if tot else 0.0
+        return {"n": tot, "dist": dist, "frac_alem_de_4": alem4}
+    timing_2t = _timing(90)
+    timing_1t = _timing(45)
+
     media_min = round(gols_jogo / 90.0, 6)  # gols/min medio (combinado, ja normalizado)
 
     cal = {
@@ -125,6 +142,11 @@ def calibrar(db):
                    "com gols/jogo do placar real (incidente esta incompleto). "
                    "PMF de acrescimo e efeito de vermelho sao PRIOR; recalibrar "
                    "quando o length anunciado (injuryTime) for coletado." % escala,
+            # MEDIDO (informativo): timing real dos gols de acrescimo. A PMF do
+            # modelo e "extra ALEM do anunciado"; aqui e o minuto ABSOLUTO. A
+            # diferenca vs stoppage_extra_pmf so fecha com o injuryTime anunciado.
+            "stoppage_timing_2t": timing_2t,
+            "stoppage_timing_1t": timing_1t,
         },
         "gols_por_jogo": round(gols_jogo, 4),
         "home_share": round(home_share, 4),
@@ -158,6 +180,9 @@ def main():
     print(f"  taxa media: {cal['taxa_media_min']}/min  "
           f"(curva: bucket0={cal['h_reg_buckets'][0]} .. bucket16={cal['h_reg_buckets'][16]})")
     print(f"  acrescimo 2T: {cal['h_stop_2h']}/min  |  1T: {cal['h_stop_1h']}/min")
+    t2 = cal["_meta"]["stoppage_timing_2t"]
+    print(f"  timing acrescimo 2T (medido, n={t2['n']}): {t2['frac_alem_de_4']:.0%} "
+          f"dos gols ocorrem ALEM de 90+4 (o prior stoppage_extra_pmf trunca em +4)")
     print(f"  -> {a.out}")
 
 

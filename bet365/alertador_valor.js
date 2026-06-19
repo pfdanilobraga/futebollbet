@@ -21,7 +21,7 @@
 // re-calibrar: rode o .py e cole os novos valores no objeto CAL abaixo.
 
 ;(function () {
-  const VERSAO = 'v2.7';   // <- aparece na barra; se nao mostrar isso, e a versao ANTIGA
+  const VERSAO = 'v2.8';   // <- aparece na barra; se nao mostrar isso, e a versao ANTIGA
   // ---------------- calibracao (de hazard_cal.json) ----------------
   const CAL = {
     home_share: 0.5489,
@@ -336,7 +336,10 @@
     document.head.appendChild(s);
   }
   function limpaCels(fx){ fx.querySelectorAll('.ovm-ParticipantOddsOnly').forEach(c=>{c.style.outline='';c.style.boxShadow='';}); }
-  function limpa(fx){ fx.style.outline=''; fx.style.boxShadow=''; fx.classList.remove('__avGreen');
+  function limpa(fx){
+    if(!fx.__avPainted) return;                      // PERF: nunca pintada -> nada a limpar
+    fx.__avPainted=false;
+    fx.style.outline=''; fx.style.boxShadow=''; fx.classList.remove('__avGreen');
     limpaCels(fx); const b=fx.querySelector('.__avBadge'); if(b)b.remove(); }
   function pinta(fx, cor, pulse, texto, cellIdx){
     fx.style.outline='3px solid '+cor; fx.style.outlineOffset='-3px'; fx.style.position='relative';
@@ -352,6 +355,7 @@
         +'padding:1px 5px;border-radius:3px;color:#000;pointer-events:none;white-space:nowrap';
       fx.prepend(b); }
     b.style.background=cor; b.innerHTML=String(texto).replace(/\n/g,'<br>');  // suporta 2 linhas (Dutch)
+    fx.__avPainted=true;                             // marca p/ o limpa() só agir no que foi pintado
   }
 
   // ---------------- scan ----------------
@@ -379,17 +383,28 @@
         // guard por-jogo: as vezes a fixture troca o 1X2 por "Marcar o Xo Gol" /
         // "Proximo Gol". Ai as 3 odds NAO sao 1/X/2 -> ignora (nao sinaliza errado).
         if(/Marcar o\s*\d|Pr[oó]ximo Gol/i.test(fx.textContent||'')){ limpa(fx); cont.IDLE++; return; }
-        const relogio=parseRelogio((fx.querySelector('.ovm-InPlayTimer')||{}).innerText);
-        const pl=[...fx.querySelectorAll('.ovm-ScorePill')].map(e=>parseInt(e.innerText,10));
-        const odds=[...fx.querySelectorAll('.ovm-ParticipantOddsOnly')].map(e=>num(e.innerText));
-        const oddsCount=odds.filter(v=>v!=null).length;
+        // PERF: textContent NAO forca reflow (innerText forca). p/ relogio/placar
+        // (texto simples) e equivalente e roda em TODAS as fixtures todo scan.
+        const relogio=parseRelogio((fx.querySelector('.ovm-InPlayTimer')||{}).textContent);
+        const pl=[...fx.querySelectorAll('.ovm-ScorePill')].map(e=>parseInt(e.textContent,10));
 
         if(!relogio || pl.length<2 || relogio.tot<cfg.watchMin){ limpa(fx); cont.IDLE++;
           if(ST[key]) ST[key].lastTot = relogio?relogio.tot:ST[key].lastTot; return; }
+        // PERF: só lê odds (e roda o modelo) dos jogos na janela ativa (>=watchMin).
+        // A maioria dos jogos ao vivo está abaixo disso e já saiu acima, sem custo.
+        const odds=[...fx.querySelectorAll('.ovm-ParticipantOddsOnly')].map(e=>num(e.innerText));
+        const oddsCount=odds.filter(v=>v!=null).length;
 
         const st = ST[key] = ST[key] || {};
+        st.tick = (st.tick||0)+1;
+        // PERF: lerAcrescimo/lerVermelhos varrem a subárvore inteira (caro). Recalcula
+        // a cada scan só na janela crítica (>=88', poucos jogos); antes, a cada 4 scans
+        // (acréscimo e cartão mudam devagar — cache não muda o sinal na prática).
+        const recomputarPesado = relogio.tot>=88 || (st.tick%4)===1;
         const ss = ssLookup(nomes[0], nomes[1]);
-        let A = (ss && ss.injury!=null) ? ss.injury : lerAcrescimo(fx);
+        let A;
+        if(ss && ss.injury!=null){ A = ss.injury; }
+        else { if(recomputarPesado || st.Acache===undefined) st.Acache = lerAcrescimo(fx); A = st.Acache; }
         // (D) se for o jogo ABERTO no painel e ja passou de 90', le o "90+N" real do painel
         if(A==null && pn && relogio.tot>=90 && pnC===normalizarTime(nomes[0]) && pnF===normalizarTime(nomes[1]))
           A = lerAcrescimoPainel();
@@ -406,7 +421,9 @@
         }
         // (A) cartao vermelho: lido do DOM (auditavel no badge 🟥); fallback SofaScore
         let redC=0, redF=0;
-        if(cfg.vermelho){ const rv=lerVermelhos(fx); redC=rv.redC; redF=rv.redF;
+        if(cfg.vermelho){
+          if(recomputarPesado || st.redCache===undefined) st.redCache = lerVermelhos(fx);
+          redC=st.redCache.redC; redF=st.redCache.redF;
           if(!redC && !redF && ss && ss.redC!=null){ redC=ss.redC; redF=ss.redF; } }
         const forca = forcaLocal(cfg.ssUrl, nomes[0], nomes[1]) || (ss?ss.forca:null);  // FBref local > SofaScore
         const Aeff = A!=null?A:cfg.unknownStoppageFloor;
