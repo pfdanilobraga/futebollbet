@@ -53,6 +53,8 @@ CLASSES = ["H", "D", "A"]            # ordem ordinal (H < D < A) usada pelo RPS
 MIN_TREINO = 50                      # nº mínimo de jogos p/ treinar de forma séria
 MIN_JOGOS_TEMPORADA = 10             # temporadas menores (ex.: copa de 1 jogo) são lixo
 N_SPLITS = 5                         # janelas do walk-forward
+HALFLIFE_PADRAO = 240                # meia-vida (dias) do decaimento temporal — ganho
+                                     # pequeno mas consistente medido no walk-forward
 ODDS_COLS = ["imp_casa", "imp_empate", "imp_fora"]
 
 
@@ -165,12 +167,22 @@ def _proba_ordenada(pipe, X):
     return proba[:, idx]
 
 
-def walk_forward(X, y, n_splits=N_SPLITS):
+def pesos_decaimento(ts, t_ref, halflife_dias):
+    """Pesos de decaimento temporal exp(-ln2 * idade/halflife): jogos recentes
+    pesam mais. halflife_dias<=0 -> None (sem ponderação)."""
+    if not halflife_dias or halflife_dias <= 0:
+        return None
+    idade_dias = (t_ref - np.asarray(ts, dtype=float)) / 86400.0
+    return np.exp(-np.log(2.0) * np.maximum(0.0, idade_dias) / halflife_dias)
+
+
+def walk_forward(X, y, n_splits=N_SPLITS, ts=None, halflife=0):
     """Re-treina em janelas crescentes e prevê a janela seguinte.
     Retorna (oof, previsto, ultimo):
       oof[nome]  -> array (n,3) de probabilidades OOF (NaN onde não previsto)
       previsto   -> máscara booleana das linhas com previsão OOF
       ultimo     -> máscara do ÚLTIMO fold (janela madura: maior treino, ~prod)
+    `ts`/`halflife` ativam ponderação por decaimento temporal no treino de cada fold.
     O baseline 'ingênuo' usa as taxas-base do treino de cada fold."""
     n = len(X)
     tscv = TimeSeriesSplit(n_splits=n_splits)
@@ -187,8 +199,14 @@ def walk_forward(X, y, n_splits=N_SPLITS):
             ultimo[te_idx] = True
         taxas = np.bincount(y[tr_idx], minlength=3) / len(tr_idx)
         oof["ingênuo"][te_idx] = taxas
+        w = None
+        if ts is not None and halflife:
+            w = pesos_decaimento(ts[tr_idx], ts[tr_idx].max(), halflife)
         for nome, pipe in construir_modelos().items():
-            pipe.fit(X.iloc[tr_idx], y[tr_idx])
+            if w is not None:
+                pipe.fit(X.iloc[tr_idx], y[tr_idx], clf__sample_weight=w)
+            else:
+                pipe.fit(X.iloc[tr_idx], y[tr_idx])
             oof[nome][te_idx] = _proba_ordenada(pipe, X.iloc[te_idx])
     return oof, previsto, ultimo
 
@@ -205,7 +223,7 @@ def _baseline_mercado(X, prev_mask):
 
 
 # ----------------------------------------------------------------- treino
-def treinar(n_splits=N_SPLITS):
+def treinar(n_splits=N_SPLITS, halflife=0, drop=None):
     df = carregar_df()
     n = len(df)
     print(f"{n} jogos finalizados.  Alvo: "
@@ -218,11 +236,17 @@ def treinar(n_splits=N_SPLITS):
               f"o pipeline; os números servem só de referência.")
 
     cols = descartar_features_vazias(df, F.COLUNAS)
+    if drop:
+        cols = [c for c in cols if c not in drop]
+        print(f"Features removidas (A/B --drop): {', '.join(drop)}")
+    if halflife:
+        print(f"Decaimento temporal: half-life {halflife:.0f} dias")
     y = df["alvo"].map({c: i for i, c in enumerate(CLASSES)}).values
     X = df[cols].astype(float)
+    ts = df["inicio_ts"].values.astype(float)
 
     # --------- walk-forward (out-of-fold) ---------
-    oof, prev, ult = walk_forward(X, y, n_splits)
+    oof, prev, ult = walk_forward(X, y, n_splits, ts=ts, halflife=halflife)
     yv = y[prev]
     print(f"\nWALK-FORWARD ({n_splits} janelas):  {prev.sum()} jogos avaliados "
           f"out-of-fold (de {n}).\n")
@@ -277,9 +301,14 @@ def treinar(n_splits=N_SPLITS):
     avaliar(f"{melhor} (T={T:.2f})", yv, aplicar_temperatura(oof[melhor][prev], T))
 
     final = construir_modelos()[melhor]
-    final.fit(X, y)
+    wfin = pesos_decaimento(ts, ts.max(), halflife)
+    if wfin is not None:
+        final.fit(X, y, clf__sample_weight=wfin)
+    else:
+        final.fit(X, y)
     joblib.dump({"pipeline": final, "colunas": cols, "classes": CLASSES,
-                 "n_treino": n, "modelo": melhor, "temperatura": T}, MODELO_PATH)
+                 "n_treino": n, "modelo": melhor, "temperatura": T,
+                 "halflife": halflife}, MODELO_PATH)
     print(f"\nModelo salvo em {MODELO_PATH}")
 
     _salvar_oof(df, oof, prev, melhor, T)
@@ -321,5 +350,10 @@ def _importancias(pipe, cols):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--splits", type=int, default=N_SPLITS)
+    ap.add_argument("--halflife", type=float, default=HALFLIFE_PADRAO,
+                    help="meia-vida em dias do decaimento temporal (0 = off)")
+    ap.add_argument("--drop", default="",
+                    help="features a excluir, separadas por vírgula (A/B)")
     a = ap.parse_args()
-    treinar(a.splits)
+    treinar(a.splits, halflife=a.halflife,
+            drop=[c.strip() for c in a.drop.split(",") if c.strip()])

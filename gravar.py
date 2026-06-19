@@ -209,9 +209,13 @@ def gravar_incidentes(con, eid, inc):
     n = 0
     for i, it in enumerate(lista):
         p = it.get("player") or {}
+        # Para incidentes 'injuryTime' o acréscimo ANUNCIADO vem em `length`
+        # (não em addedTime). Guardamos em `acrescimo` — é o dado que faltava p/
+        # calibrar a PMF "extra além do anunciado" do modelo ao vivo (prob_aovivo).
+        acr = it.get("length") if it.get("incidentType") == "injuryTime" else it.get("addedTime")
         con.execute(
             "INSERT OR REPLACE INTO incidente VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (eid, i, it.get("time"), it.get("addedTime"),
+            (eid, i, it.get("time"), acr,
              it.get("incidentType"), it.get("incidentClass"),
              1 if it.get("isHome") else (0 if it.get("isHome") is False else None),
              p.get("name") or it.get("playerName"), p.get("id"),
