@@ -21,7 +21,7 @@
 // re-calibrar: rode o .py e cole os novos valores no objeto CAL abaixo.
 
 ;(function () {
-  const VERSAO = 'v2.9d';  // <- aparece na barra; se nao mostrar isso, e a versao ANTIGA (d = tier DUTCH)
+  const VERSAO = 'v2.9e';  // <- aparece na barra; se nao mostrar isso, e a versao ANTIGA (e = fix do "parou de sinalizar")
   // ---------------- calibracao (de hazard_cal.json) ----------------
   const CAL = {
     home_share: 0.5489,
@@ -379,6 +379,8 @@
       return;
     }
     document.querySelectorAll('.ovm-Fixture').forEach(fx=>{        // agrupada OU ordenada
+      try {                                                         // blindagem: 1 fixture com erro
+                                                                    // NUNCA derruba o scan inteiro
         if(!fx.closest(SEL_LISTA)) return;                          // pula o jogo aberto (painel)
         const comp=fx.closest('.ovm-Competition');
         const liga=comp?(txt(comp.querySelector('.ovm-CompetitionHeader'))||'').split('\n')[0].trim():'';
@@ -387,10 +389,10 @@
         // guard por-jogo: as vezes a fixture troca o 1X2 por "Marcar o Xo Gol" /
         // "Proximo Gol". Ai as 3 odds NAO sao 1/X/2 -> ignora (nao sinaliza errado).
         if(/Marcar o\s*\d|Pr[oó]ximo Gol/i.test(fx.textContent||'')){ limpa(fx); cont.IDLE++; return; }
-        // PERF: textContent NAO forca reflow (innerText forca). p/ relogio/placar
-        // (texto simples) e equivalente e roda em TODAS as fixtures todo scan.
-        const relogio=parseRelogio((fx.querySelector('.ovm-InPlayTimer')||{}).textContent);
-        const pl=[...fx.querySelectorAll('.ovm-ScorePill')].map(e=>parseInt(e.textContent,10));
+        // relogio/placar via innerText (comportamento original, robusto ao layout
+        // do bet365 — textContent quebrava o parse do relogio em alguns renders).
+        const relogio=parseRelogio((fx.querySelector('.ovm-InPlayTimer')||{}).innerText);
+        const pl=[...fx.querySelectorAll('.ovm-ScorePill')].map(e=>parseInt(e.innerText,10));
 
         if(!relogio || pl.length<2 || relogio.tot<cfg.watchMin){ limpa(fx); cont.IDLE++;
           if(ST[key]) ST[key].lastTot = relogio?relogio.tot:ST[key].lastTot; return; }
@@ -514,6 +516,8 @@
         cont[tier]++;
 
         st.lastTot=relogio.tot; st.lastScore=pl.join('-'); st.lastOdds=oddsCount;
+      } catch(e){ if(!window.__avErr){ window.__avErr=e;       // loga 1x; nao trava o scan
+          console.warn('alertador: erro numa fixture (ignorada) —', e); } }
     });
     barra(cont, cfg);
   }
