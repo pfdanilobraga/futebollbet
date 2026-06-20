@@ -21,7 +21,7 @@
 // re-calibrar: rode o .py e cole os novos valores no objeto CAL abaixo.
 
 ;(function () {
-  const VERSAO = 'v2.9e';  // <- aparece na barra; se nao mostrar isso, e a versao ANTIGA (e = fix do "parou de sinalizar")
+  const VERSAO = 'v2.9f';  // <- aparece na barra; se nao mostrar isso, e a versao ANTIGA (f = filtro de odd minima)
   // ---------------- calibracao (de hazard_cal.json) ----------------
   const CAL = {
     home_share: 0.5489,
@@ -65,6 +65,8 @@
     valorEdge: 0.08,         // (C) margem de valor minima: oddTela/justo >= 1+isto
     dutchTier: true,         // sinaliza TAMBEM quando cobrir as 2 opcoes for +EV (acende as 2 celulas + quanto em cada)
     dutchEvMin: 0,           // EV minimo (%) do Dutching p/ disparar (0 = qualquer lucro esperado pelo modelo)
+    minOdd: 1.20,            // NAO sinaliza com odd abaixo disto: upside irrisorio (ex.: 1.03) e zona
+                             // onde o modelo fica superconfiante (100%) -> evita sinal de lixo de fim de jogo
   };
 
   const COR = { WATCH:'#6aa0ff', VALOR:'#a06bff', DUTCH:'#00c2b8', ARM:'#ffb300', GREEN:'#2bd24f', STALE:'#e23b3b' };
@@ -451,7 +453,8 @@
         const greenCeil = (A!=null) ? 90+A+cfg.greenOvershoot : 90+cfg.hardCeiling;
         const noSurge = (st.lastScore===undefined || st.lastScore===pl.join('-'))
                         && (st.lastOdds===undefined || !(st.lastOdds<3 && oddsCount>=3)); // sem flap
-        const armOk = relogio.tot>=cfg.armMin && gateProb>=cfg.probMin && valor && mercadoOk && fr.ok;
+        const valeOdd = oddTela!=null && oddTela>=cfg.minOdd;   // upside minimo p/ valer a pena
+        const armOk = relogio.tot>=cfg.armMin && gateProb>=cfg.probMin && valor && valeOdd && mercadoOk && fr.ok;
         const greenCond = armOk && relogio.tot>=greenMin && relogio.tot<=greenCeil
                           && fr.strict && noSurge && mercadoOk;
         st.green = greenCond ? (st.green||0)+1 : 0;
@@ -459,7 +462,7 @@
         // (C) tier VALOR — cedo, mais variancia: so ANTES da janela ARM, exige colchao + margem de valor
         const edgeOk = (oddTela!=null) && be>0 && (oddTela/be)>=(1+cfg.valorEdge);
         const valorOk = cfg.valorTier && !armOk && !isGreen && relogio.tot>=cfg.valorMin
-                        && gateProb>=(cfg.probMin+cfg.valorMargin) && edgeOk && mercadoOk && fr.ok;
+                        && gateProb>=(cfg.probMin+cfg.valorMargin) && edgeOk && valeOdd && mercadoOk && fr.ok;
 
         // DUTCHING como SINAL proprio: cobrir as 2 opcoes de MENOR odd quando isso
         // for +EV pelo modelo. Usa a banda PESSIMISTA no resultado excluido (mais
@@ -500,6 +503,8 @@
           txtBadge = `${tier}${tier==='ARM'?motivo:''} ${dom.lab} ${(domProb*100).toFixed(0)}%${banda}`
                      + ` | just ${be.toFixed(2)} | tela ${tela} ${valor?'✓':'✗'} | ${aTxt}${reds}`;
           if(tier==='VALOR') txtBadge += ` · valor +${((oddTela/be-1)*100).toFixed(0)}% (cedo, +variância)`;
+          if(tier==='WATCH' && gateProb>=cfg.probMin && valor && !valeOdd)
+            txtBadge += ` · odd ${tela}<${cfg.minOdd} (sem upside, nao sinaliza)`;  // explica por que ficou em WATCH
           if(cfg.dutch && (tier==='ARM'||tier==='GREEN')) txtBadge += linhaDutch;   // dutch como info auxiliar
           cellsToPaint = tier==='WATCH'?-1:dom.idx;
         }
@@ -567,6 +572,12 @@
       iVal.onchange=()=>{ let v=parseInt(iVal.value,10); if(!(v>=0&&v<=25)){ iVal.value=Math.round(cfg.valorMargin*100); return; }
         cfg.valorMargin=v/100; saveLS(cfg); };
       sVal.innerHTML='🎯 +'; sVal.appendChild(iVal); sVal.appendChild(document.createTextNode('pp'));
+      // 🏷 odd minima p/ sinalizar (filtra os spots de upside irrisorio, ex.: 1.03)
+      const sMin=document.createElement('span'); sMin.style.cssText='display:inline-flex;align-items:center;gap:3px';
+      const iMin=mkInput(cfg.minOdd,'42px','Odd minima p/ sinalizar. Abaixo disto o upside e irrisorio (ex.: 1.20). Mata sinal de lixo de fim de jogo.');
+      iMin.min='1'; iMin.max='5'; iMin.step='0.05';
+      iMin.onchange=()=>{ const v=parseFloat(iMin.value); if(v>=1){ cfg.minOdd=v; saveLS(cfg); } else iMin.value=cfg.minOdd; };
+      sMin.innerHTML='🏷 odd≥'; sMin.appendChild(iMin);
       // ↺ volta ao padrao
       const reset=document.createElement('span'); reset.textContent='↺ padrão';
       reset.style.cssText='color:#6aa0ff;cursor:pointer;font-size:11px';
@@ -574,11 +585,11 @@
       reset.onclick=()=>{ try{localStorage.removeItem(LS_KEY);}catch(e){}
         cfg.stakeTotal=DEF.stakeTotal; cfg.armMin=DEF.armMin; cfg.watchMin=DEF.watchMin;
         cfg.greenBuffer=DEF.greenBuffer; cfg.unknownStoppageFloor=DEF.unknownStoppageFloor;
-        cfg.usarBanda=DEF.usarBanda; cfg.valorMargin=DEF.valorMargin;
+        cfg.usarBanda=DEF.usarBanda; cfg.valorMargin=DEF.valorMargin; cfg.minOdd=DEF.minOdd;
         iStake.value=DEF.stakeTotal; iArm.value=DEF.armMin;
-        iBanda.checked=DEF.usarBanda; iVal.value=Math.round(DEF.valorMargin*100); };
+        iBanda.checked=DEF.usarBanda; iVal.value=Math.round(DEF.valorMargin*100); iMin.value=DEF.minOdd; };
       row.appendChild(sStake); row.appendChild(sArm); row.appendChild(sBanda);
-      row.appendChild(sVal); row.appendChild(reset);
+      row.appendChild(sVal); row.appendChild(sMin); row.appendChild(reset);
       bar.appendChild(status); bar.appendChild(row);
       document.body.appendChild(bar); }
     let status=bar.querySelector('#__avBarStatus');
@@ -611,13 +622,14 @@
         r.unknownStoppageFloor = r.armMin<88 ? 1 : 2; }
       if(typeof o.usarBanda==='boolean') r.usarBanda=o.usarBanda;        // (B) toggle da banda
       if(o.valorMargin>=0 && o.valorMargin<=0.25) r.valorMargin=+o.valorMargin;  // (C) margem VALOR
+      if(o.minOdd>=1 && o.minOdd<=5) r.minOdd=+o.minOdd;                  // filtro de odd minima
       return r;
     }catch(e){ return {}; }
   }
   function saveLS(cfg){
     try{ localStorage.setItem(LS_KEY, JSON.stringify(
-      {stakeTotal:cfg.stakeTotal, armMin:cfg.armMin,
-       usarBanda:cfg.usarBanda, valorMargin:cfg.valorMargin})); }catch(e){}
+      {stakeTotal:cfg.stakeTotal, armMin:cfg.armMin, usarBanda:cfg.usarBanda,
+       valorMargin:cfg.valorMargin, minOdd:cfg.minOdd})); }catch(e){}
   }
 
   // ---------------- API ----------------
