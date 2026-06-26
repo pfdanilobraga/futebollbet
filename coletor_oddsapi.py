@@ -52,6 +52,22 @@ DEFAULT_SPORTS = [
 ]
 # casa de aposta preferida (consistência com o projeto): bet365 > pinnacle > média
 PREF_BOOKS = ["bet365", "pinnacle", "marathonbet", "williamhill", "betfair_ex_eu"]
+# ordem de prioridade quando há mais ligas ativas que o teto diário (grandes primeiro)
+PRIORIDADE = [
+    "soccer_epl", "soccer_spain_la_liga", "soccer_italy_serie_a",
+    "soccer_germany_bundesliga", "soccer_france_ligue_one", "soccer_efl_champ",
+    "soccer_uefa_champs_league", "soccer_uefa_europa_league",
+    "soccer_brazil_campeonato", "soccer_brazil_serie_b",
+    "soccer_conmebol_copa_libertadores", "soccer_conmebol_copa_sudamericana",
+    "soccer_netherlands_eredivisie", "soccer_portugal_primeira_liga",
+    "soccer_usa_mls", "soccer_spain_segunda_division",
+]
+
+
+def _priorizar(ligas):
+    """Grandes/continentais primeiro; o resto em ordem alfabética."""
+    s = set(ligas)
+    return [x for x in PRIORIDADE if x in s] + sorted(x for x in ligas if x not in PRIORIDADE)
 
 
 def conectar():
@@ -178,9 +194,12 @@ def listar(key):
 
 def main():
     ap = argparse.ArgumentParser(description="Coletor the-odds-api (odds 1X2 correntes).")
-    ap.add_argument("--sports", help="sport_keys separadas por vírgula (override do default)")
+    ap.add_argument("--sports", help="sport_keys separadas por vírgula (override; senão = todas ativas)")
     ap.add_argument("--regions", default="eu", help="região (eu/uk/us); 1 região = 1 crédito")
-    ap.add_argument("--listar", action="store_true", help="lista ligas de futebol (não gasta crédito)")
+    ap.add_argument("--max", type=int, default=16,
+                    help="máx de ligas/dia (protege o plano grátis ~500 créditos/mês). default 16")
+    ap.add_argument("--dry", action="store_true", help="só lista as ligas que puxaria (não gasta crédito)")
+    ap.add_argument("--listar", action="store_true", help="lista TODAS as ligas de futebol (não gasta crédito)")
     a = ap.parse_args()
 
     key = _api_key()
@@ -193,22 +212,44 @@ def main():
     if not os.path.exists(DB):
         sys.exit("futebol.db não existe.")
 
-    sports = ([s.strip() for s in a.sports.split(",")] if a.sports else DEFAULT_SPORTS)
-    ativos = _ativos(key)                    # filtra fora-de-temporada (economiza crédito)
-    if ativos is not None:
-        pular = [s for s in sports if s not in ativos]
-        sports = [s for s in sports if s in ativos]
-        if pular:
-            print(f"(fora de temporada agora, pulando: {', '.join(pular)})")
+    sports_arg = [s.strip() for s in a.sports.split(",")] if a.sports else None
+    ativos = _ativos(key)                    # ligas em temporada (auto-ajusta); /sports é grátis
+    if sports_arg:                           # usuário pediu ligas específicas
+        sports = sports_arg
+        if ativos is not None:
+            fora = [s for s in sports if s not in ativos]
+            sports = [s for s in sports if s in ativos]
+            if fora:
+                print(f"(fora de temporada, pulando: {', '.join(fora)})")
+    elif ativos is None:                     # sem /sports: cai no padrão seguro
+        sports = DEFAULT_SPORTS
+        print("(/sports indisponível; usando lista padrão Brasil/Libertadores)")
+    else:                                    # default: TODAS as ligas ativas, grandes primeiro, com teto
+        # exclui mercados de aposta-futura (campeão etc.) — não têm 1X2 (h2h)
+        soccer = [s for s in ativos if s.startswith("soccer_") and "winner" not in s]
+        sports = _priorizar(soccer)
+        if len(sports) > a.max:
+            cortadas = sports[a.max:]
+            sports = sports[:a.max]
+            print(f"(teto de {a.max} ligas/dia p/ caber no plano grátis — fora hoje: "
+                  f"{', '.join(c.replace('soccer_', '') for c in cortadas)})")
     if not sports:
-        print("Nenhuma liga ativa entre as pedidas no momento — nada a coletar.")
+        print("Nenhuma liga ativa no momento — nada a coletar.")
+        return
+    if a.dry:                                # só mostra o que puxaria (não gasta crédito)
+        print(f"Puxaria {len(sports)} ligas hoje (~{len(sports)} créditos):")
+        for s in sports:
+            print("  ", s)
         return
     con = conectar()
     mtch = mapeamento_times.Matcher(con)
     try:
         for sk in sports:
             try:
-                coletar_sport(con, mtch, key, sk, a.regions)
+                _, _, rem = coletar_sport(con, mtch, key, sk, a.regions)
+                if rem is not None and str(rem).isdigit() and int(rem) < 5:
+                    print(f"(crédito quase esgotado: {rem} restantes — parando por hoje)")
+                    break
             except Exception as e:
                 print(f"[{sk}] erro: {e}")
     finally:
