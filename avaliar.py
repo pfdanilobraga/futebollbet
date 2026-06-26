@@ -16,6 +16,7 @@ Uso:
 """
 import datetime as dt
 import sys
+import unicodedata
 
 import requests
 from rapidfuzz import fuzz, process
@@ -28,21 +29,48 @@ import prever as PV
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-# atalhos amigáveis -> sport_key (só valem se a liga estiver em temporada)
+# atalhos amigáveis -> sport_key (só resolvem se a liga estiver em temporada;
+# fora isso o fuzzy nos títulos ainda tenta achar). Acentos são ignorados (_norm).
 ALIASES = {
-    "premier": "soccer_epl", "epl": "soccer_epl", "inglaterra": "soccer_epl",
-    "brasileirao": "soccer_brazil_campeonato", "brasil": "soccer_brazil_campeonato",
-    "serie a brasil": "soccer_brazil_campeonato", "serieb": "soccer_brazil_serie_b",
-    "serie b": "soccer_brazil_serie_b",
-    "libertadores": "soccer_conmebol_copa_libertadores",
-    "sudamericana": "soccer_conmebol_copa_sudamericana",
-    "italia": "soccer_italy_serie_a", "serie a": "soccer_italy_serie_a",
-    "championship": "soccer_efl_champ",
-    "espanha": "soccer_spain_la_liga", "la liga": "soccer_spain_la_liga",
+    # Inglaterra
+    "premier": "soccer_epl", "premier league": "soccer_epl", "epl": "soccer_epl",
+    "inglaterra": "soccer_epl", "ingles": "soccer_epl", "inglesa": "soccer_epl",
+    "championship": "soccer_efl_champ", "segundona inglesa": "soccer_efl_champ",
+    "league one": "soccer_england_league1", "league 1": "soccer_england_league1",
+    "fa cup": "soccer_fa_cup", "copa da inglaterra": "soccer_fa_cup",
+    "efl cup": "soccer_england_efl_cup", "copa da liga inglesa": "soccer_england_efl_cup",
+    # Brasil
+    "brasileirao": "soccer_brazil_campeonato", "brasileirao a": "soccer_brazil_campeonato",
+    "brasil": "soccer_brazil_campeonato", "serie a brasil": "soccer_brazil_campeonato",
+    "serie b": "soccer_brazil_serie_b", "serie b brasil": "soccer_brazil_serie_b",
+    "brasileirao b": "soccer_brazil_serie_b",
+    # América do Sul
+    "libertadores": "soccer_conmebol_copa_libertadores", "liberta": "soccer_conmebol_copa_libertadores",
+    "sudamericana": "soccer_conmebol_copa_sudamericana", "sula": "soccer_conmebol_copa_sudamericana",
+    "argentina": "soccer_argentina_primera_division",
+    # Europa (ligas grandes)
+    "italia": "soccer_italy_serie_a", "serie a": "soccer_italy_serie_a", "calcio": "soccer_italy_serie_a",
+    "espanha": "soccer_spain_la_liga", "la liga": "soccer_spain_la_liga", "laliga": "soccer_spain_la_liga",
     "alemanha": "soccer_germany_bundesliga", "bundesliga": "soccer_germany_bundesliga",
-    "franca": "soccer_france_ligue_one", "ligue 1": "soccer_france_ligue_one",
-    "mundial": "soccer_fifa_world_cup", "copa do mundo": "soccer_fifa_world_cup",
-    "china": "soccer_china_superleague",
+    "copa da alemanha": "soccer_germany_dfb_pokal", "dfb pokal": "soccer_germany_dfb_pokal",
+    "franca": "soccer_france_ligue_one", "ligue 1": "soccer_france_ligue_one", "frances": "soccer_france_ligue_one",
+    "holanda": "soccer_netherlands_eredivisie", "eredivisie": "soccer_netherlands_eredivisie",
+    "portugal": "soccer_portugal_primeira_liga", "primeira liga": "soccer_portugal_primeira_liga",
+    "belgica": "soccer_belgium_first_div", "turquia": "soccer_turkey_super_league",
+    "escocia": "soccer_spl",
+    "champions": "soccer_uefa_champs_league", "champions league": "soccer_uefa_champs_league",
+    "liga dos campeoes": "soccer_uefa_champs_league",
+    "europa league": "soccer_uefa_europa_league", "uel": "soccer_uefa_europa_league",
+    # Escandinávia / nórdicos (ativas no meio do ano)
+    "noruega": "soccer_norway_eliteserien", "suecia": "soccer_sweden_allsvenskan",
+    "allsvenskan": "soccer_sweden_allsvenskan", "superettan": "soccer_sweden_superettan",
+    "finlandia": "soccer_finland_veikkausliiga", "irlanda": "soccer_league_of_ireland",
+    # Resto do mundo
+    "china": "soccer_china_superleague", "japao": "soccer_japan_j_league", "jleague": "soccer_japan_j_league",
+    "mexico": "soccer_mexico_ligamx", "liga mx": "soccer_mexico_ligamx",
+    "eua": "soccer_usa_mls", "mls": "soccer_usa_mls", "estados unidos": "soccer_usa_mls",
+    # Seleções
+    "mundial": "soccer_fifa_world_cup", "copa do mundo": "soccer_fifa_world_cup", "copa": "soccer_fifa_world_cup",
 }
 
 
@@ -52,8 +80,12 @@ def ligas_ativas(key):
     return [(s["key"], s["title"]) for s in r.json() if s.get("group") == "Soccer"]
 
 
+def _semacento(s):
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower().strip()
+
+
 def resolver(termo, ativas):
-    termo = termo.strip().lower()
+    termo = _semacento(termo)                 # ignora acentos: "frança" -> "franca"
     chaves = {k for k, _ in ativas}
     if termo in ALIASES and ALIASES[termo] in chaves:
         return next((k, t) for k, t in ativas if k == ALIASES[termo])
