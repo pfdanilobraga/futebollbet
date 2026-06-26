@@ -296,6 +296,32 @@ def features_para_evento(con, evento_id):
     return hist.features(ev)
 
 
+def features_para_eventos(con, evento_ids):
+    """Versão em LOTE: calcula features de vários eventos (futuros) construindo o
+    histórico UMA única vez (vs. uma vez por evento). Como os jogos não iniciados
+    estão todos após os finalizados, um único histórico "até agora" serve a todos.
+    Retorna {evento_id: feat}. Crucial p/ performance com banco grande (136k+)."""
+    if not evento_ids:
+        return {}
+    hist = HistoricoLiga(con)
+    for r in con.execute(
+            """SELECT id, casa_id, fora_id, inicio_ts, gols_casa, gols_fora
+               FROM evento WHERE status='finished' AND gols_casa IS NOT NULL
+               ORDER BY inicio_ts, id"""):
+        hist.registrar(dict(zip(
+            ["id", "casa_id", "fora_id", "inicio_ts", "gols_casa", "gols_fora"], r)))
+    out = {}
+    for chunk_ini in range(0, len(evento_ids), 500):     # IN (...) em lotes
+        chunk = evento_ids[chunk_ini:chunk_ini + 500]
+        qs = ",".join("?" * len(chunk))
+        for ev in con.execute(
+                f"SELECT id, casa_id, fora_id, inicio_ts FROM evento WHERE id IN ({qs})",
+                tuple(chunk)):
+            d = dict(zip(["id", "casa_id", "fora_id", "inicio_ts"], ev))
+            out[d["id"]] = hist.features(d)
+    return out
+
+
 if __name__ == "__main__":
     # diagnóstico rápido: quantos jogos e cobertura de cada feature
     import os

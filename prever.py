@@ -37,7 +37,7 @@ def carregar_modelo():
     return joblib.load(MODELO_PATH)
 
 
-def prever_evento(con, modelo, evento_id, verboso=True):
+def prever_evento(con, modelo, evento_id, verboso=True, feat=None):
     nomes = con.execute(
         """SELECT tc.nome, tf.nome FROM evento e
            JOIN time tc ON tc.id=e.casa_id JOIN time tf ON tf.id=e.fora_id
@@ -45,7 +45,8 @@ def prever_evento(con, modelo, evento_id, verboso=True):
     if not nomes:
         print(f"Evento {evento_id} não está no banco.")
         return
-    feat = F.features_para_evento(con, evento_id)
+    if feat is None:                       # lote já pode ter calculado (--proximos)
+        feat = F.features_para_evento(con, evento_id)
     if feat is None:
         print(f"Evento {evento_id}: sem features.")
         return
@@ -95,9 +96,10 @@ def main():
         if a.proximos:
             ids = [r[0] for r in con.execute(
                 "SELECT id FROM evento WHERE status='notstarted' ORDER BY inicio_ts")]
-            print(f"{len(ids)} jogos não iniciados.")
+            print(f"{len(ids)} jogos não iniciados. Construindo histórico (1x) e prevendo…")
+            feats = F.features_para_eventos(con, ids)       # histórico UMA vez (rápido)
             for eid in ids:
-                prever_evento(con, modelo, eid)
+                prever_evento(con, modelo, eid, feat=feats.get(eid))
         elif a.evento_id:
             prever_evento(con, modelo, a.evento_id)
         else:
