@@ -154,6 +154,17 @@ def coletar_sport(con, mtch, key, sport_key, regions="eu"):
     return n_ev, n_od, rem
 
 
+def _ativos(key):
+    """Conjunto de sport_keys ATIVAS (em temporada) — /sports sem all=true NÃO gasta crédito."""
+    try:
+        r = requests.get(f"{BASE}/sports", params={"apiKey": key}, timeout=40)
+        if r.status_code == 200:
+            return {s["key"] for s in r.json()}
+    except Exception:
+        pass
+    return None
+
+
 def listar(key):
     r = requests.get(f"{BASE}/sports", params={"apiKey": key, "all": "true"}, timeout=40)
     if r.status_code != 200:
@@ -183,6 +194,15 @@ def main():
         sys.exit("futebol.db não existe.")
 
     sports = ([s.strip() for s in a.sports.split(",")] if a.sports else DEFAULT_SPORTS)
+    ativos = _ativos(key)                    # filtra fora-de-temporada (economiza crédito)
+    if ativos is not None:
+        pular = [s for s in sports if s not in ativos]
+        sports = [s for s in sports if s in ativos]
+        if pular:
+            print(f"(fora de temporada agora, pulando: {', '.join(pular)})")
+    if not sports:
+        print("Nenhuma liga ativa entre as pedidas no momento — nada a coletar.")
+        return
     con = conectar()
     mtch = mapeamento_times.Matcher(con)
     try:
