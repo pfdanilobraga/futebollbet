@@ -1,7 +1,40 @@
 # ⚽ Projeto Futebol — Banco de dados e probabilidades de vitória
 
 > Documento de apresentação do projeto. Autossuficiente: tudo que foi feito, como funciona,
-> o que já existe e para onde vamos. Atualizado em **10/06/2026**.
+> o que já existe e para onde vamos. Atualizado em **25/06/2026**.
+
+---
+
+## 🔄 Atualização 25/06/2026 — Reformulação multi-fonte (dados primeiro)
+
+Diagnóstico: o gargalo nunca foi o algoritmo — era **dado** (só 3 ligas nichadas sem xG, odds em ~6% dos jogos).
+A reformulação dividiu a meta em dois eixos e maximizou cada um onde ele existe (xG denso só existe nas ligas top):
+
+- **Largura (odds + resultado, mundial):** novo `coletor_oddscsv.py` ingere o **football-data.co.uk**
+  (CSV grátis, sem Cloudflare — só `requests`). Resultado: **971 → 136.234 eventos**, **3 → 44 torneios**,
+  cobertura de **odds 1X2 de ~6% → 99,7%**. Complemento `coletor_oddsapi.py` (the-odds-api, precisa de API key grátis)
+  para odds correntes/live de ligas que o CSV não cobre.
+- **Casamento de fontes:** `mapeamento_times.py` + tabela `time_alias`. Política **conservadora** —
+  auto-link só em match exato (país-aware); fuzzy vira sugestão logada, nunca funde sozinho
+  (evita merges errados tipo *Atletico-MG → Atlético Goianiense*). IDs externos são **negativos** (SofaScore usa positivos).
+  Eventos são casados (±36h, mesmos times) para não duplicar jogos já raspados.
+- **Impacto no modelo (walk-forward OOF, 113k jogos):** antes o modelo perdia para o ingênuo OOF; agora
+  **RPS 0,2040 ≈ mercado 0,2034** (ingênuo 0,2283), acurácia 50,4%. **Calibração intrínseca: ECE 0,0020**
+  (melhor que o mercado 0,0052) e **temperatura caiu de ~3,3 → 1,02** (não precisa mais de muleta).
+  Top features: `imp_casa`/`imp_fora`/`imp_empate` (mercado) dominam.
+- **Leitura honesta:** o ganho é **calibração + largura** (a estrela-guia), não edge. O modelo agora *acompanha* o
+  mercado em 44 ligas; **não o bate**. Em jogos SEM odds segue ~ingênuo — confirma que o sinal vem do mercado, não de forma/xG.
+
+Rotina diária (`manutencao.py`) agora também roda `coletor_oddscsv.py --corrente` (temporada corrente, barato).
+
+**Fase 2 — xG denso (Understat) + veredito final.** `coletor_understat.py` ingeriu xG por chute das 5
+ligas Big-5 (~3,2k jogos, 80k chutes), casando ao evento por **placar+data+nome** (sem duplicar). Re-treino +
+análise pareada (`analise_xg.py`) deram o veredito DEFINITIVO: mesmo COM xG gold-standard **e** odds, o modelo
+**não bate o mercado** — Δ(modelo−mercado) = **+0,0034 RPS** justamente nas ligas com xG (o mercado é ainda
+mais afiado nas ligas top/líquidas). Importância de `xg_casa` ficou em 0,025 (igual a antes). **Conclusão: xG já
+está embutido no preço; o teto de mercado é real.** A entrega final é um modelo bem-calibrado (ECE ~0,002) e de
+largura mundial, não um gerador de edge. Não vale deslocar coleta SofaScore p/ Big-5 (ganho nulo no 1X2);
+xG/força só pode ajudar no **tool ao vivo** (prob_aovivo), onde não há odds pré-jogo embutindo tudo.
 
 ---
 

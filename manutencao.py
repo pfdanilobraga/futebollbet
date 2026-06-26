@@ -71,6 +71,11 @@ def main(backfill):
     except Exception as e:
         print(f"(raspador indisponível: {e})")
 
+    # 3.5) odds + resultados de muitas ligas via football-data.co.uk (CSV, sem
+    #      Cloudflare). Só temporada corrente+anterior — barato, atualiza 2x/semana.
+    print("\n--- Odds/resultados football-data.co.uk (temporada corrente) ---")
+    subprocess.run([PY, os.path.join(PASTA, "coletor_oddscsv.py"), "--corrente"], check=False)
+
     # 4) re-treino + previsões (silencioso se faltar lib de ML)
     try:
         import sklearn, xgboost  # noqa: F401
