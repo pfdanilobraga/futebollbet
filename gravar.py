@@ -251,3 +251,65 @@ def gravar_standings(con, temporada_id, st):
                  r.get("scoresFor"), r.get("scoresAgainst"), r.get("points")))
             n += 1
     return n
+
+
+# ====================================================================
+# Fontes EXTERNAS (não-SofaScore): football-data.co.uk, the-odds-api...
+# Usam ids sintéticos NEGATIVOS (SofaScore usa positivos) -> zero colisão.
+# ====================================================================
+def gravar_evento_externo(con, ev):
+    """Insere/atualiza um evento de fonte externa a partir de campos JÁ planos.
+
+    `ev` (dict) deve trazer: id, casa_id, fora_id, inicio_ts (todos resolvidos);
+    opcionais: torneio_id/torneio_nome/torneio_slug/pais, temporada_id/temporada_nome/ano,
+    rodada, status (default 'finished'), vencedor (1 casa/2 fora/3 empate),
+    gols_casa, gols_fora, gols_casa_1t, gols_fora_1t.
+    Os times (casa_id/fora_id) já precisam existir (criados via mapeamento_times)."""
+    if not ev or ev.get("id") is None:
+        return None
+    if ev.get("torneio_id") is not None:
+        con.execute(
+            "INSERT INTO torneio (id, nome, slug, pais) VALUES (?,?,?,?) "
+            "ON CONFLICT(id) DO NOTHING",
+            (ev["torneio_id"], ev.get("torneio_nome"), ev.get("torneio_slug"),
+             ev.get("pais")))
+    if ev.get("temporada_id") is not None and ev.get("torneio_id") is not None:
+        con.execute(
+            "INSERT INTO temporada (id, torneio_id, nome, ano) VALUES (?,?,?,?) "
+            "ON CONFLICT(id) DO NOTHING",
+            (ev["temporada_id"], ev["torneio_id"], ev.get("temporada_nome"),
+             ev.get("ano")))
+    con.execute(
+        """INSERT INTO evento (id, custom_id, temporada_id, torneio_id, rodada,
+               casa_id, fora_id, inicio_ts, status, vencedor,
+               gols_casa, gols_fora, gols_casa_1t, gols_fora_1t, tem_xg,
+               arbitro, estadio, atualizado_em)
+           VALUES (?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,NULL,datetime('now'))
+           ON CONFLICT(id) DO UPDATE SET
+               status=excluded.status, vencedor=excluded.vencedor,
+               gols_casa=excluded.gols_casa, gols_fora=excluded.gols_fora,
+               gols_casa_1t=excluded.gols_casa_1t, gols_fora_1t=excluded.gols_fora_1t,
+               atualizado_em=datetime('now')""",
+        (ev["id"], ev.get("temporada_id"), ev.get("torneio_id"), ev.get("rodada"),
+         ev["casa_id"], ev["fora_id"], ev["inicio_ts"],
+         ev.get("status", "finished"), ev.get("vencedor"),
+         ev.get("gols_casa"), ev.get("gols_fora"),
+         ev.get("gols_casa_1t"), ev.get("gols_fora_1t")))
+    return ev["id"]
+
+
+def gravar_odd_linha(con, eid, mercado, escolha, dec, abe=None, parametro=""):
+    """Grava UMA linha de odd reusando a convenção ON CONFLICT da tabela `odd`.
+    Preserva odd_abertura existente quando a nova vier None (COALESCE)."""
+    if dec is None or dec <= 1.0:
+        return 0
+    con.execute(
+        """INSERT INTO odd (evento_id, mercado, parametro, escolha,
+               odd_decimal, odd_abertura, coletado_em)
+           VALUES (?,?,?,?,?,?,datetime('now'))
+           ON CONFLICT(evento_id, mercado, parametro, escolha) DO UPDATE SET
+               odd_decimal=excluded.odd_decimal,
+               odd_abertura=COALESCE(excluded.odd_abertura, odd.odd_abertura),
+               coletado_em=datetime('now')""",
+        (eid, mercado, parametro, escolha, dec, abe))
+    return 1

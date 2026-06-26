@@ -37,6 +37,16 @@ CREATE TABLE IF NOT EXISTS jogador (
     data_nasc   INTEGER                       -- unix timestamp
 );
 
+-- Casamento de nomes de time entre fontes EXTERNAS (football-data.co.uk,
+-- the-odds-api...) e o `time.id` (origem SofaScore, ids positivos). Fontes
+-- externas criam times sintéticos com id NEGATIVO. Ver mapeamento_times.py.
+CREATE TABLE IF NOT EXISTS time_alias (
+    fonte       TEXT NOT NULL,                -- 'fdcouk' | 'theoddsapi' | 'understat'...
+    nome_fonte  TEXT NOT NULL,                -- nome do time como aparece na fonte
+    time_id     INTEGER NOT NULL REFERENCES time(id),
+    PRIMARY KEY (fonte, nome_fonte)
+);
+
 -- ---------- Fatos: partida ----------
 
 CREATE TABLE IF NOT EXISTS evento (
