@@ -76,10 +76,9 @@ def main(backfill):
     print("\n--- Odds/resultados football-data.co.uk (temporada corrente) ---")
     subprocess.run([PY, os.path.join(PASTA, "coletor_oddscsv.py"), "--corrente"], check=False)
 
-    # 3.6) odds CORRENTES de jogos FUTUROS via the-odds-api (só ligas ativas, ~poucos
-    #      créditos/dia). Requer THE_ODDS_API_KEY no .env; sem ela o passo só avisa e segue.
-    print("\n--- Odds correntes the-odds-api (jogos futuros) ---")
-    subprocess.run([PY, os.path.join(PASTA, "coletor_oddsapi.py")], check=False)
+    # 3.6) odds CORRENTES de jogos futuros: SOB DEMANDA (não automático, p/ não gastar
+    #      crédito). Rode quando quiser avaliar uma liga:  py avaliar.py <liga>
+    #      (ex.: py avaliar.py premier). 1 crédito the-odds-api por liga.
 
     # 4) re-treino + previsões (silencioso se faltar lib de ML)
     try:
